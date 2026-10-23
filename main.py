@@ -27,14 +27,12 @@ user_data = {}
 
 # --- Загрузка фото в MAX ---
 async def upload_photo_to_max(photo_url: str) -> str:
-    # 1. Скачиваем фото
     async with aiohttp.ClientSession() as session:
         async with session.get(photo_url, ssl=False) as resp:
             if resp.status != 200:
                 raise Exception(f"Скачивание: HTTP {resp.status}")
             photo_data = await resp.read()
 
-    # 2. Получаем URL для загрузки
     headers = {"Authorization": BOT_TOKEN}
     async with aiohttp.ClientSession() as session:
         async with session.post(
@@ -45,7 +43,6 @@ async def upload_photo_to_max(photo_url: str) -> str:
                 raise Exception(f"Запрос URL: HTTP {resp.status}")
             upload_url = (await resp.json()).get("url")
 
-    # 3. Загружаем файл
     async with aiohttp.ClientSession() as session:
         form = aiohttp.FormData()
         form.add_field('data', photo_data, filename='photo.jpg')
@@ -143,9 +140,9 @@ async def handle_message(message: Message):
         elif state == "waiting_phone":
             user_data[chat_id]['phone'] = text
             
-            # Итоговый текст объявления (без звездочек и с эмодзи)
+            # Итоговый текст объявления (значки с двух сторон)
             post_text = (
-                f"Объявление 📌\n\n"
+                f"📌 Объявление 📌\n\n"
                 f"{user_data[chat_id].get('ad_text')}\n\n"
                 f"👤 Продавец: {user_data[chat_id].get('name')}\n"
                 f"📞 Телефон: {text}"
