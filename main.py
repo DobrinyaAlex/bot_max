@@ -12,7 +12,6 @@ BOT_TOKEN = os.getenv("MAX_BOT_TOKEN")
 try:
     ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 except ValueError:
-    print("!!! ВНИМАНИЕ: ADMIN_CHAT_ID задан неверно. Укажите только цифры !!!")
     ADMIN_CHAT_ID = 0
 
 if not BOT_TOKEN:
@@ -30,7 +29,7 @@ user_data = {}
 # --- Шаг 1: Обработчик кнопки "Начать" ---
 @router.bot_started()
 async def on_start(event: BotStarted):
-    user_id = event.user.user_id 
+    user_id = str(event.user.user_id) 
     user_states[user_id] = "waiting_captcha"
     user_data[user_id] = {}
 
@@ -48,19 +47,20 @@ async def on_start(event: BotStarted):
     
     try:
         await bot.send_message(chat_id=event.chat_id, text=rules_text, keyboard=kb)
-    except MaxForbiddenError:
-        print("!!! ОШИБКА: MAX заблокировал диалог (dialog.suspended). Нажмите 'Начать' в MAX еще раз !!!")
+    except Exception as e:
+        print(f"!!! ОШИБКА ОТПРАВКИ ПРИВЕТСТВИЯ: {e} !!!")
 
 # --- Шаг 2: Обработчик нажатия на inline-кнопку ---
 @router.message_callback()
 async def handle_callbacks(callback):
     print(f"=== ОТЛАДКА: НАЖАТА КНОПКА. PAYLOAD: {callback.payload} ===")
     
-    if callback.payload == "captcha_passed":
+    if getattr(callback, 'payload', None) == "captcha_passed":
         try:
             chat_id = callback.message.recipient.chat_id
-            user_id = callback.message.sender.user_id
+            user_id = str(callback.message.sender.user_id)
             
+            print(f"=== ID ПОЛЬЗОВАТЕЛЯ ПОСЛЕ КНОПКИ: {user_id} ===")
             user_states[user_id] = "waiting_text"
             
             try:
@@ -74,30 +74,31 @@ async def handle_callbacks(callback):
             )
             print("=== ОТЛАДКА: ОТВЕТ НА КНОПКУ УСПЕШНО ОТПРАВЛЕН ===")
             
-        except MaxForbiddenError:
-             print("!!! ОШИБКА: MAX заблокировал отправку после нажатия кнопки !!!")
         except Exception as e:
             print(f"!!! ОШИБКА ПРИ ОБРАБОТКЕ КНОПКИ: {e} !!!")
 
 # --- Шаг 3: Обработчик текстовых сообщений и фото ---
 @router.message()
 async def handle_message(message: Message):
-    user_id = message.sender.user_id
-    chat_id = message.recipient.chat_id
-    text = message.body.text if message.body.text else ""
-    
-    print(f"=== ПОЛУЧЕНО СООБЩЕНИЕ ОТ {user_id}: {text} ===")
-
-    if user_id not in user_states:
-        try:
-            await bot.send_message(chat_id=chat_id, text="Пожалуйста, нажмите кнопку 'Начать' в меню бота.")
-        except MaxForbiddenError:
-            print("!!! ОШИБКА: Бот не может написать пользователю (dialog.suspended) !!!")
-        return
-
-    state = user_states[user_id]
-
+    # Безопасное извлечение данных (защита от 0 ms падений)
     try:
+        user_id = str(message.sender.user_id)
+        chat_id = message.recipient.chat_id
+        
+        text = ""
+        if getattr(message, 'body', None) and getattr(message.body, 'text', None):
+            text = message.body.text
+            
+        print(f"=== ПОЛУЧЕНО СООБЩЕНИЕ ОТ {user_id}: {text} ===")
+
+        if user_id not in user_states:
+            print("!!! ПОЛЬЗОВАТЕЛЬ НЕ В СОСТОЯНИИ. ОТПРАВЛЯЕМ ПРИГЛАШЕНИЕ !!!")
+            await bot.send_message(chat_id=chat_id, text="Пожалуйста, нажмите кнопку 'Начать' в меню бота.")
+            return
+
+        state = user_states[user_id]
+        print(f"=== ТЕКУЩЕЕ СОСТОЯНИЕ: {state} ===")
+
         # Ждем текст
         if state == "waiting_text":
             if len(text) > 500:
@@ -110,7 +111,7 @@ async def handle_message(message: Message):
 
         # Ждем фото
         elif state == "waiting_photo":
-            if message.body.attachments:
+            if getattr(message.body, 'attachments', None):
                 photo_url = message.body.attachments[0].payload.url
                 user_data[user_id]['photo'] = photo_url
                 user_states[user_id] = "waiting_name"
@@ -146,19 +147,15 @@ async def handle_message(message: Message):
                 print(f"=== ОТПРАВЛЯЕМ ЗАЯВКУ НА ID: {ADMIN_CHAT_ID} ===")
                 await bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_text)
                 await bot.send_message(chat_id=chat_id, text="✅ Спасибо! Ваше объявление отправлено на проверку.")
-            except MaxForbiddenError:
-                 await bot.send_message(chat_id=chat_id, text="❌ Ошибка: администратор заблокировал бота. Сообщите ему об этом.")
             except Exception as e:
                 print(f"!!! ОШИБКА ОТПРАВКИ АДМИНУ: {e} !!!")
-                await bot.send_message(chat_id=chat_id, text=f"❌ Ошибка отправки администратору.\n\nТекст ошибки от MAX: {e}")
+                await bot.send_message(chat_id=chat_id, text=f"❌ Ошибка отправки администратору.\n\nТекст ошибки: {e}")
             
             del user_states[user_id]
             del user_data[user_id]
 
-    except MaxForbiddenError:
-        print("!!! ОШИБКА: MAX заблокировал диалог во время отправки сообщения (dialog.suspended) !!!")
     except Exception as e:
-        print(f"!!! НЕИЗВЕСТНАЯ ОШИБКА: {e} !!!")
+        print(f"!!! КРИТИЧЕСКАЯ ОШИБКА В ОБРАБОТЧИКЕ СООБЩЕНИЙ: {e} !!!")
 
 async def main():
     dp.include_router(router)
