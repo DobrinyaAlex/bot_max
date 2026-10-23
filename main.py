@@ -1,35 +1,29 @@
 import asyncio
 import logging
 import os
-from maxgram import Bot, Dispatcher, Router, F
-from maxgram.fsm import State, StatesGroup, MemoryStorage, FSMContext
+from maxgram import Bot, Dispatcher, Router
 from maxgram.types import BotStarted, Message
-from maxgram.utils.keyboard import InlineKeyboardBuilder
 
-# --- Конфигурация ---
 BOT_TOKEN = os.getenv("MAX_BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 
-if not BOT_TOKEN:
-    raise ValueError("Не задана переменная окружения MAX_BOT_TOKEN")
-
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+dp = Dispatcher()
 router = Router()
 
-# --- Состояния (FSM) для шагов ---
-class AdForm(StatesGroup):
-    waiting_for_text = State()
-    waiting_for_photo = State()
-    waiting_for_name = State()
-    waiting_for_phone = State()
+# --- Хранилища данных (вместо FSM) ---
+# Здесь мы храним, на каком шаге сейчас пользователь
+user_states = {} 
+# Здесь мы храним собранные данные объявления
+user_data = {}
 
-# --- Шаг 1: Обработчик кнопки "Начать" ---
+# --- Обработчик кнопки "Начать" ---
 @router.bot_started()
 async def on_start(event: BotStarted):
-    builder = InlineKeyboardBuilder()
-    builder.callback(text="✅ Я человек / Продолжить", payload="captcha_passed")
+    user_id = event.user.id
+    user_states[user_id] = "waiting_text"
+    user_data[user_id] = {} # Очищаем старые данные
 
     rules_text = (
         "Здравствуйте! Я помогу оформить объявление.\n\n"
@@ -37,97 +31,83 @@ async def on_start(event: BotStarted):
         "1. Текст объявления — до 500 символов.\n"
         "2. Фотография — 1 шт.\n"
         "3. Имя и телефон для связи.\n\n"
-        "Нажмите кнопку ниже, чтобы подтвердить, что вы человек."
+        "✅ Проверка пройдена! Введите текст вашего объявления:"
     )
-    await event.answer(text=rules_text, keyboard=builder)
+    await event.answer(text=rules_text)
 
-# --- Шаг 2: Обработчик нажатия на кнопку ---
-@router.message_callback(lambda call: call.payload == "captcha_passed")
-async def process_captcha(callback, state: FSMContext):
-    await callback.answer(notification="Проверка пройдена!")
+# --- Обработчик всех текстовых сообщений ---
+@router.message()
+async def handle_message(message: Message):
+    user_id = message.sender.user_id
+    text = message.body.text if message.body.text else ""
     
-    # Переводим бота в режим ожидания текста
-    await state.set_state(AdForm.waiting_for_text)
-    await callback.message.answer("✅ Проверка пройдена! Введите текст вашего объявления (до 500 символов):")
-
-# --- Шаг 3: Ловим текст ---
-@router.message(AdForm.waiting_for_text)
-async def handle_text(message: Message, state: FSMContext):
-    if not message.body.text:
-        await message.answer("Пожалуйста, отправьте именно текст.")
+    # Если пользователь новый и не нажимал "Начать"
+    if user_id not in user_states:
+        await message.answer("Пожалуйста, нажмите кнопку 'Начать' в меню бота.")
         return
 
-    await state.update_data(ad_text=message.body.text)
-    await state.set_state(AdForm.waiting_for_photo)
-    await message.answer("Текст принят. Теперь отправьте фотографию (или напишите «Пропустить»).")
+    state = user_states[user_id]
 
-# --- Шаг 4: Ловим фото (или пропуск) ---
-@router.message(AdForm.waiting_for_photo)
-async def handle_photo(message: Message, state: FSMContext):
-    if message.body.attachments:
-        # Берем первое фото
-        photo_url = message.body.attachments[0].payload.url
-        await state.update_data(ad_photo=photo_url)
-        await state.set_state(AdForm.waiting_for_name)
-        await message.answer("Фото принято. Теперь укажите имя продавца.")
+    # Шаг 1: Ловим текст
+    if state == "waiting_text":
+        if len(text) > 500:
+            await message.answer("❌ Текст слишком длинный. Максимум 500 символов.")
+            return
         
-    elif message.body.text and message.body.text.lower() == "пропустить":
-        await state.update_data(ad_photo=None)
-        await state.set_state(AdForm.waiting_for_name)
-        await message.answer("Фото пропущено. Теперь укажите имя продавца.")
+        user_data[user_id]['ad_text'] = text
+        user_states[user_id] = "waiting_photo"
+        await message.answer("Текст принят! Теперь отправьте фотографию (или напишите «Пропустить»).")
+
+    # Шаг 2: Ловим фото
+    elif state == "waiting_photo":
+        if message.body.attachments:
+            # Достаем URL фото
+            photo_url = message.body.attachments[0].payload.url
+            user_data[user_id]['photo'] = photo_url
+            user_states[user_id] = "waiting_name"
+            await message.answer("Фото принято. Теперь укажите имя продавца.")
+        elif text.lower() == "пропустить":
+            user_data[user_id]['photo'] = None
+            user_states[user_id] = "waiting_name"
+            await message.answer("Фото пропущено. Теперь укажите имя продавца.")
+        else:
+            await message.answer("Пожалуйста, отправьте фото или напишите «Пропустить».")
+
+    # Шаг 3: Ловим имя
+    elif state == "waiting_name":
+        user_data[user_id]['name'] = text
+        user_states[user_id] = "waiting_phone"
+        await message.answer("Имя принято. Теперь укажите контактный телефон.")
+
+    # Шаг 4: Ловим телефон и отправляем
+    elif state == "waiting_phone":
+        user_data[user_id]['phone'] = text
         
-    else:
-        await message.answer("Пожалуйста, отправьте фото или напишите «Пропустить».")
+        # Формируем сообщение для админа
+        admin_text = (
+            f"📥 **Новое объявление на проверку**\n\n"
+            f"**Текст:** {user_data[user_id].get('ad_text')}\n"
+            f"**Имя:** {user_data[user_id].get('name')}\n"
+            f"**Телефон:** {text}\n"
+            f"**ID пользователя:** {user_id}"
+        )
+        if user_data[user_id].get('photo'):
+            admin_text += f"\n**Фото:** {user_data[user_id].get('photo')}"
 
-# --- Шаг 5: Ловим имя ---
-@router.message(AdForm.waiting_for_name)
-async def handle_name(message: Message, state: FSMContext):
-    if not message.body.text:
-        await message.answer("Пожалуйста, отправьте имя текстом.")
-        return
+        try:
+            await bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_text)
+            await message.answer("✅ Спасибо! Ваше объявление отправлено на проверку.")
+        except Exception as e:
+            logging.error(f"Ошибка отправки админу: {e}")
+            await message.answer("Произошла ошибка при отправке.")
 
-    await state.update_data(seller_name=message.body.text)
-    await state.set_state(AdForm.waiting_for_phone)
-    await message.answer("Имя принято. Теперь укажите контактный телефон.")
+        # Очищаем состояние после завершения
+        del user_states[user_id]
+        del user_data[user_id]
 
-# --- Шаг 6: Ловим телефон и отправляем админу ---
-@router.message(AdForm.waiting_for_phone)
-async def handle_phone(message: Message, state: FSMContext):
-    if not message.body.text:
-        await message.answer("Пожалуйста, отправьте телефон текстом.")
-        return
-
-    phone = message.body.text
-    data = await state.get_data()
-    await state.clear() # Сбрасываем состояние
-
-    ad_text = data.get("ad_text", "—")
-    seller_name = data.get("seller_name", "—")
-    photo_url = data.get("ad_photo")
-
-    # Формируем сообщение для админа/канала
-    admin_text = (
-        f"📥 **Новое объявление на проверку**\n\n"
-        f"**Текст:** {ad_text}\n"
-        f"**Имя:** {seller_name}\n"
-        f"**Телефон:** {phone}\n"
-        f"**ID пользователя:** {message.sender.user_id}"
-    )
-    if photo_url:
-        admin_text += f"\n**Фото:** {photo_url}"
-
-    try:
-        # Отправляем на модерацию
-        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_text)
-        await message.answer("✅ Спасибо! Ваше объявление отправлено на проверку.")
-    except Exception as e:
-        logging.error(f"Ошибка отправки админу: {e}")
-        await message.answer("Произошла ошибка при отправке. Попробуйте позже.")
-
-# --- Запуск ---
 async def main():
     dp.include_router(router)
-    print("=== БОТ УСПЕШНО ЗАПУЩЕН ===")
+    print("=== БОТ ЗАПУЩЕН (БЕЗ FSM) ===")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
