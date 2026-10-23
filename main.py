@@ -4,6 +4,7 @@ import os
 from maxgram import Bot, Dispatcher, Router
 from maxgram.types import BotStarted, Message
 from maxgram.utils.keyboard import InlineKeyboardBuilder
+from maxgram.exceptions import MaxForbiddenError
 
 # --- Конфигурация ---
 BOT_TOKEN = os.getenv("MAX_BOT_TOKEN")
@@ -45,7 +46,10 @@ async def on_start(event: BotStarted):
         "Нажмите кнопку ниже, чтобы подтвердить, что вы человек."
     )
     
-    await event.answer(text=rules_text, keyboard=kb)
+    try:
+        await bot.send_message(chat_id=event.chat_id, text=rules_text, keyboard=kb)
+    except MaxForbiddenError:
+        print("!!! ОШИБКА: MAX заблокировал диалог (dialog.suspended). Нажмите 'Начать' в MAX еще раз !!!")
 
 # --- Шаг 2: Обработчик нажатия на inline-кнопку ---
 @router.message_callback()
@@ -54,27 +58,24 @@ async def handle_callbacks(callback):
     
     if callback.payload == "captcha_passed":
         try:
-            # Безопасно достаем ID из прикрепленного сообщения
             chat_id = callback.message.recipient.chat_id
             user_id = callback.message.sender.user_id
             
-            print(f"=== НАЙДЕН USER_ID: {user_id} ===")
-            
             user_states[user_id] = "waiting_text"
             
-            # Отвечаем на колбэк (убираем часики загрузки)
             try:
                 await callback.answer()
             except Exception:
                 pass
 
-            # Отправляем сообщение
             await bot.send_message(
                 chat_id=chat_id, 
                 text="✅ Проверка пройдена! Введите текст вашего объявления (до 500 символов):"
             )
             print("=== ОТЛАДКА: ОТВЕТ НА КНОПКУ УСПЕШНО ОТПРАВЛЕН ===")
             
+        except MaxForbiddenError:
+             print("!!! ОШИБКА: MAX заблокировал отправку после нажатия кнопки !!!")
         except Exception as e:
             print(f"!!! ОШИБКА ПРИ ОБРАБОТКЕ КНОПКИ: {e} !!!")
 
@@ -82,68 +83,82 @@ async def handle_callbacks(callback):
 @router.message()
 async def handle_message(message: Message):
     user_id = message.sender.user_id
+    chat_id = message.recipient.chat_id
     text = message.body.text if message.body.text else ""
     
+    print(f"=== ПОЛУЧЕНО СООБЩЕНИЕ ОТ {user_id}: {text} ===")
+
     if user_id not in user_states:
-        await message.answer("Пожалуйста, нажмите кнопку 'Начать' в меню бота.")
+        try:
+            await bot.send_message(chat_id=chat_id, text="Пожалуйста, нажмите кнопку 'Начать' в меню бота.")
+        except MaxForbiddenError:
+            print("!!! ОШИБКА: Бот не может написать пользователю (dialog.suspended) !!!")
         return
 
     state = user_states[user_id]
 
-    # Ждем текст
-    if state == "waiting_text":
-        if len(text) > 500:
-            await message.answer("❌ Текст слишком длинный. Максимум 500 символов.")
-            return
-        
-        user_data[user_id]['ad_text'] = text
-        user_states[user_id] = "waiting_photo"
-        await message.answer("Текст принят! Теперь отправьте фотографию (или напишите «Пропустить»).")
+    try:
+        # Ждем текст
+        if state == "waiting_text":
+            if len(text) > 500:
+                await bot.send_message(chat_id=chat_id, text="❌ Текст слишком длинный. Максимум 500 символов.")
+                return
+            
+            user_data[user_id]['ad_text'] = text
+            user_states[user_id] = "waiting_photo"
+            await bot.send_message(chat_id=chat_id, text="Текст принят! Теперь отправьте фотографию (или напишите «Пропустить»).")
 
-    # Ждем фото
-    elif state == "waiting_photo":
-        if message.body.attachments:
-            photo_url = message.body.attachments[0].payload.url
-            user_data[user_id]['photo'] = photo_url
-            user_states[user_id] = "waiting_name"
-            await message.answer("Фото принято. Теперь укажите имя продавца.")
-        elif text.lower() == "пропустить":
-            user_data[user_id]['photo'] = None
-            user_states[user_id] = "waiting_name"
-            await message.answer("Фото пропущено. Теперь укажите имя продавца.")
-        else:
-            await message.answer("Пожалуйста, отправьте фото или напишите «Пропустить».")
+        # Ждем фото
+        elif state == "waiting_photo":
+            if message.body.attachments:
+                photo_url = message.body.attachments[0].payload.url
+                user_data[user_id]['photo'] = photo_url
+                user_states[user_id] = "waiting_name"
+                await bot.send_message(chat_id=chat_id, text="Фото принято. Теперь укажите имя продавца.")
+            elif text.lower() == "пропустить":
+                user_data[user_id]['photo'] = None
+                user_states[user_id] = "waiting_name"
+                await bot.send_message(chat_id=chat_id, text="Фото пропущено. Теперь укажите имя продавца.")
+            else:
+                await bot.send_message(chat_id=chat_id, text="Пожалуйста, отправьте фото или напишите «Пропустить».")
 
-    # Ждем имя
-    elif state == "waiting_name":
-        user_data[user_id]['name'] = text
-        user_states[user_id] = "waiting_phone"
-        await message.answer("Имя принято. Теперь укажите контактный телефон.")
+        # Ждем имя
+        elif state == "waiting_name":
+            user_data[user_id]['name'] = text
+            user_states[user_id] = "waiting_phone"
+            await bot.send_message(chat_id=chat_id, text="Имя принято. Теперь укажите контактный телефон.")
 
-    # Ждем телефон и отправляем
-    elif state == "waiting_phone":
-        user_data[user_id]['phone'] = text
-        
-        admin_text = (
-            f"📥 **Новое объявление на проверку**\n\n"
-            f"**Текст:** {user_data[user_id].get('ad_text')}\n"
-            f"**Имя:** {user_data[user_id].get('name')}\n"
-            f"**Телефон:** {text}\n"
-            f"**ID пользователя:** {user_id}"
-        )
-        if user_data[user_id].get('photo'):
-            admin_text += f"\n**Фото:** {user_data[user_id].get('photo')}"
+        # Ждем телефон и отправляем
+        elif state == "waiting_phone":
+            user_data[user_id]['phone'] = text
+            
+            admin_text = (
+                f"📥 **Новое объявление на проверку**\n\n"
+                f"**Текст:** {user_data[user_id].get('ad_text')}\n"
+                f"**Имя:** {user_data[user_id].get('name')}\n"
+                f"**Телефон:** {text}\n"
+                f"**ID пользователя:** {user_id}"
+            )
+            if user_data[user_id].get('photo'):
+                admin_text += f"\n**Фото:** {user_data[user_id].get('photo')}"
 
-        try:
-            print(f"=== ОТПРАВЛЯЕМ ЗАЯВКУ НА ID: {ADMIN_CHAT_ID} ===")
-            await bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_text)
-            await message.answer("✅ Спасибо! Ваше объявление отправлено на проверку.")
-        except Exception as e:
-            print(f"!!! ОШИБКА ОТПРАВКИ АДМИНУ: {e} !!!")
-            await message.answer(f"❌ Ошибка отправки администратору.\n\nТекст ошибки от MAX: {e}")
-        
-        del user_states[user_id]
-        del user_data[user_id]
+            try:
+                print(f"=== ОТПРАВЛЯЕМ ЗАЯВКУ НА ID: {ADMIN_CHAT_ID} ===")
+                await bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_text)
+                await bot.send_message(chat_id=chat_id, text="✅ Спасибо! Ваше объявление отправлено на проверку.")
+            except MaxForbiddenError:
+                 await bot.send_message(chat_id=chat_id, text="❌ Ошибка: администратор заблокировал бота. Сообщите ему об этом.")
+            except Exception as e:
+                print(f"!!! ОШИБКА ОТПРАВКИ АДМИНУ: {e} !!!")
+                await bot.send_message(chat_id=chat_id, text=f"❌ Ошибка отправки администратору.\n\nТекст ошибки от MAX: {e}")
+            
+            del user_states[user_id]
+            del user_data[user_id]
+
+    except MaxForbiddenError:
+        print("!!! ОШИБКА: MAX заблокировал диалог во время отправки сообщения (dialog.suspended) !!!")
+    except Exception as e:
+        print(f"!!! НЕИЗВЕСТНАЯ ОШИБКА: {e} !!!")
 
 async def main():
     dp.include_router(router)
