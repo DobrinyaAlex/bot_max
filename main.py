@@ -25,7 +25,7 @@ router = Router()
 user_states = {}
 user_data = {}
 
-# --- Функция загрузки фото в MAX ---
+# --- Загрузка фото в MAX ---
 async def upload_photo_to_max(photo_url: str) -> str:
     # 1. Скачиваем фото
     async with aiohttp.ClientSession() as session:
@@ -142,11 +142,13 @@ async def handle_message(message: Message):
         # Шаг 4: телефон и публикация
         elif state == "waiting_phone":
             user_data[chat_id]['phone'] = text
+            
+            # Итоговый текст объявления (без звездочек и с эмодзи)
             post_text = (
-                f"📌 **Объявление**\n\n"
+                f"Объявление 📌\n\n"
                 f"{user_data[chat_id].get('ad_text')}\n\n"
-                f"👤 **Продавец:** {user_data[chat_id].get('name')}\n"
-                f"📞 **Телефон:** {text}"
+                f"👤 Продавец: {user_data[chat_id].get('name')}\n"
+                f"📞 Телефон: {text}"
             )
 
             photos = user_data[chat_id].get('photos', [])
@@ -161,7 +163,7 @@ async def handle_message(message: Message):
                     await bot.send_message(chat_id=chat_id, text=f"⚠️ Не удалось загрузить некоторые фото: {e}")
 
             try:
-                # Отправляем пост в канал без кнопок
+                # Отправляем пост в канал
                 await bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
                     text=post_text,
