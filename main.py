@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+import aiohttp
+import io
 from maxgram import Bot, Dispatcher, Router
 from maxgram.types import BotStarted, Message
 from maxgram.utils.keyboard import InlineKeyboardBuilder
@@ -84,7 +86,6 @@ async def handle_message(message: Message):
 
         state = user_states[chat_id]
 
-        # Ждем текст
         if state == "waiting_text":
             if len(text) > 500:
                 await bot.send_message(chat_id=chat_id, text="❌ Текст слишком длинный. Максимум 500 символов.")
@@ -94,9 +95,9 @@ async def handle_message(message: Message):
             user_states[chat_id] = "waiting_photo"
             await bot.send_message(chat_id=chat_id, text="Текст принят! Теперь отправьте фотографию (или напишите «Пропустить»).")
 
-        # Ждем фото
         elif state == "waiting_photo":
             if getattr(message.body, 'attachments', None):
+                # Сохраняем ссылку на фото
                 photo_url = message.body.attachments[0].payload.url
                 user_data[chat_id]['photo'] = photo_url
                 user_states[chat_id] = "waiting_name"
@@ -108,17 +109,14 @@ async def handle_message(message: Message):
             else:
                 await bot.send_message(chat_id=chat_id, text="Пожалуйста, отправьте фото или напишите «Пропустить».")
 
-        # Ждем имя
         elif state == "waiting_name":
             user_data[chat_id]['name'] = text
             user_states[chat_id] = "waiting_phone"
             await bot.send_message(chat_id=chat_id, text="Имя принято. Теперь укажите контактный телефон.")
 
-        # Ждем телефон и публикуем в канал
         elif state == "waiting_phone":
             user_data[chat_id]['phone'] = text
             
-            # Формируем красивый текст для поста
             post_text = (
                 f"📌 **Объявление**\n\n"
                 f"{user_data[chat_id].get('ad_text')}\n\n"
@@ -126,31 +124,37 @@ async def handle_message(message: Message):
                 f"📞 **Телефон:** {text}"
             )
 
-            try:
-                photo_url = user_data[chat_id].get('photo')
-                if photo_url:
-                    # Отправляем фото с подписью (как настоящий пост)
-                    await bot.send_photo(
-                        chat_id=ADMIN_CHAT_ID, 
-                        photo=photo_url, 
-                        caption=post_text
-                    )
-                else:
-                    # Если фото нет, отправляем просто текст
-                    await bot.send_message(
-                        chat_id=ADMIN_CHAT_ID, 
-                        text=post_text
-                    )
-                
-                await bot.send_message(chat_id=chat_id, text="✅ Спасибо! Ваше объявление успешно опубликовано в канале.")
-            except Exception as e:
-                print(f"!!! ОШИБКА ОТПРАВКИ ПОСТА: {e} !!!")
-                # Если случилась ошибка, пробуем отправить хотя бы текстом
+            photo_url = user_data[chat_id].get('photo')
+            
+            if photo_url:
+                try:
+                    # СКАЧИВАЕМ ФОТО В ПАМЯТЬ
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(photo_url) as resp:
+                            if resp.status == 200:
+                                photo_data = await resp.read()
+                                
+                                # ОТПРАВЛЯЕМ СКАЧАННОЕ ФОТО В КАНАЛ
+                                await bot.send_photo(
+                                    chat_id=ADMIN_CHAT_ID, 
+                                    photo=photo_data, 
+                                    caption=post_text
+                                )
+                                await bot.send_message(chat_id=chat_id, text="✅ Спасибо! Ваше объявление с фото опубликовано в канале.")
+                            else:
+                                raise Exception(f"Не удалось скачать фото (HTTP {resp.status})")
+                except Exception as e:
+                    print(f"!!! ОШИБКА СКАЧИВАНИЯ/ОТПРАВКИ ФОТО: {e} !!!")
+                    # Если не получилось с фото, отправляем хотя бы текст
+                    await bot.send_message(chat_id=ADMIN_CHAT_ID, text=post_text + "\n\n(Фото не загрузилось)")
+                    await bot.send_message(chat_id=chat_id, text="✅ Объявление опубликовано (текстом, т.к. фото не загрузилось).")
+            else:
+                # Если фото пропущено изначально
                 try:
                     await bot.send_message(chat_id=ADMIN_CHAT_ID, text=post_text)
-                    await bot.send_message(chat_id=chat_id, text="✅ Объявление опубликовано (без фото).")
-                except:
-                    await bot.send_message(chat_id=chat_id, text=f"❌ Ошибка публикации.\n\nТекст ошибки: {e}")
+                    await bot.send_message(chat_id=chat_id, text="✅ Спасибо! Ваше объявление опубликовано в канале.")
+                except Exception as e:
+                    print(f"!!! ОШИБКА ОТПРАВКИ ТЕКСТА: {e} !!!")
             
             del user_states[chat_id]
             del user_data[chat_id]
