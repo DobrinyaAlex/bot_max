@@ -52,14 +52,23 @@ async def on_start(event: BotStarted):
 async def handle_callbacks(callback):
     print(f"=== ОТЛАДКА: НАЖАТА КНОПКА. PAYLOAD: {callback.payload} ===")
     
-    # Проверяем, что нажата именно наша кнопка
     if callback.payload == "captcha_passed":
         try:
-            # Безопасно достаем ID
-            user_id = callback.sender.user_id
+            # Безопасный поиск user_id (в разных версиях библиотеки он лежит в разных местах)
+            user_id = None
+            if hasattr(callback, 'user') and hasattr(callback.user, 'user_id'):
+                user_id = callback.user.user_id
+            elif hasattr(callback, 'message') and hasattr(callback.message, 'sender'):
+                user_id = callback.message.sender.user_id
+            elif hasattr(callback, 'from_user'):
+                user_id = callback.from_user.user_id
+
+            print(f"=== НАЙДЕН USER_ID: {user_id} ===")
+            
             chat_id = callback.message.recipient.chat_id
             
-            user_states[user_id] = "waiting_text"
+            if user_id:
+                user_states[user_id] = "waiting_text"
             
             # Отвечаем на колбэк (убираем часики загрузки на кнопке)
             try:
@@ -67,7 +76,7 @@ async def handle_callbacks(callback):
             except Exception:
                 pass
 
-            # Отправляем сообщение напрямую
+            # Отправляем следующее сообщение напрямую
             await bot.send_message(
                 chat_id=chat_id, 
                 text="✅ Проверка пройдена! Введите текст вашего объявления (до 500 символов):"
