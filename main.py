@@ -3,11 +3,11 @@ import logging
 import os
 from maxgram import Bot, Dispatcher, Router
 from maxgram.types import BotStarted, Message
+from maxgram.utils.keyboard import InlineKeyboardBuilder
 
 # --- Конфигурация ---
 BOT_TOKEN = os.getenv("MAX_BOT_TOKEN")
 
-# Безопасно получаем ID админа, чтобы скрипт не падал, если там пробел или буква
 try:
     ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 except ValueError:
@@ -22,25 +22,22 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 
-# --- Хранилища данных ---
+# --- Хранилища данных (вместо FSM) ---
 user_states = {}
 user_data = {}
 
-# --- Обработчик кнопки "Начать" ---
+# --- Шаг 1: Обработчик кнопки "Начать" ---
 @router.bot_started()
 async def on_start(event: BotStarted):
-    print("=== ОТЛАДКА: СРАБОТАЛ ОБРАБОТЧИК КНОПКИ 'НАЧАТЬ' ===")
+    user_id = event.user.user_id 
     
-    # ИСПРАВЛЕНИЕ: берем user_id правильно
-    try:
-        user_id = event.user.user_id 
-    except AttributeError:
-        user_id = event.chat_id # Запасной вариант
-
-    print(f"=== ID ПОЛЬЗОВАТЕЛЯ: {user_id} ===")
-
-    user_states[user_id] = "waiting_text"
+    # Ставим состояние "ожидание капчи"
+    user_states[user_id] = "waiting_captcha"
     user_data[user_id] = {}
+
+    # Создаем inline-кнопку для проверки
+    kb = InlineKeyboardBuilder()
+    kb.callback(text="✅ Я человек / Продолжить", payload="captcha_passed")
 
     rules_text = (
         "Здравствуйте! Я помогу оформить объявление.\n\n"
@@ -48,30 +45,34 @@ async def on_start(event: BotStarted):
         "1. Текст объявления — до 500 символов.\n"
         "2. Фотография — 1 шт.\n"
         "3. Имя и телефон для связи.\n\n"
-        "✅ Введите текст вашего объявления:"
+        "Нажмите кнопку ниже, чтобы подтвердить, что вы человек."
     )
     
-    try:
-        await event.answer(text=rules_text)
-        print("=== ОТЛАДКА: ПРИВЕТСТВИЕ УСПЕШНО ОТПРАВЛЕНО ===")
-    except Exception as e:
-        print(f"!!! ОШИБКА ОТПРАВКИ ПРИВЕТСТВИЯ: {e} !!!")
+    await event.answer(text=rules_text, keyboard=kb)
 
-# --- Обработчик всех сообщений ---
+# --- Шаг 2: Обработчик нажатия на кнопку ---
+@router.message_callback(lambda call: call.payload == "captcha_passed")
+async def process_captcha(callback):
+    user_id = callback.sender.user_id
+    user_states[user_id] = "waiting_text"
+    
+    await callback.answer(notification="Проверка пройдена!")
+    await callback.message.answer("✅ Проверка пройдена! Введите текст вашего объявления (до 500 символов):")
+
+# --- Шаг 3: Обработчик всех текстовых сообщений и фото ---
 @router.message()
 async def handle_message(message: Message):
     user_id = message.sender.user_id
     text = message.body.text if message.body.text else ""
     
-    print(f"=== ОТЛАДКА: ПОЛУЧЕНО СООБЩЕНИЕ ОТ {user_id}: {text} ===")
-
+    # Если пользователь не нажимал "Начать"
     if user_id not in user_states:
         await message.answer("Пожалуйста, нажмите кнопку 'Начать' в меню бота.")
         return
 
     state = user_states[user_id]
 
-    # Шаг 1: Ловим текст
+    # Ждем текст
     if state == "waiting_text":
         if len(text) > 500:
             await message.answer("❌ Текст слишком длинный. Максимум 500 символов.")
@@ -81,7 +82,7 @@ async def handle_message(message: Message):
         user_states[user_id] = "waiting_photo"
         await message.answer("Текст принят! Теперь отправьте фотографию (или напишите «Пропустить»).")
 
-    # Шаг 2: Ловим фото
+    # Ждем фото
     elif state == "waiting_photo":
         if message.body.attachments:
             photo_url = message.body.attachments[0].payload.url
@@ -95,13 +96,13 @@ async def handle_message(message: Message):
         else:
             await message.answer("Пожалуйста, отправьте фото или напишите «Пропустить».")
 
-    # Шаг 3: Ловим имя
+    # Ждем имя
     elif state == "waiting_name":
         user_data[user_id]['name'] = text
         user_states[user_id] = "waiting_phone"
         await message.answer("Имя принято. Теперь укажите контактный телефон.")
 
-    # Шаг 4: Ловим телефон и отправляем
+    # Ждем телефон и отправляем
     elif state == "waiting_phone":
         user_data[user_id]['phone'] = text
         
@@ -116,18 +117,21 @@ async def handle_message(message: Message):
             admin_text += f"\n**Фото:** {user_data[user_id].get('photo')}"
 
         try:
+            print(f"=== ОТПРАВЛЯЕМ ЗАЯВКУ НА ID: {ADMIN_CHAT_ID} ===")
             await bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_text)
             await message.answer("✅ Спасибо! Ваше объявление отправлено на проверку.")
         except Exception as e:
+            # Выводим настоящую ошибку в чат, чтобы понять причину
             print(f"!!! ОШИБКА ОТПРАВКИ АДМИНУ: {e} !!!")
-            await message.answer("Произошла ошибка при отправке (проверьте ADMIN_CHAT_ID).")
-
+            await message.answer(f"❌ Ошибка отправки администратору.\n\nТекст ошибки от MAX: {e}")
+        
+        # Очищаем данные
         del user_states[user_id]
         del user_data[user_id]
 
 async def main():
     dp.include_router(router)
-    print("=== БОТ УСПЕШНО ЗАПУЩЕН (БЕЗ FSM) ===")
+    print("=== БОТ УСПЕШНО ЗАПУЩЕН ===")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
