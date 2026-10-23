@@ -47,36 +47,28 @@ async def on_start(event: BotStarted):
     
     await event.answer(text=rules_text, keyboard=kb)
 
-# --- Шаг 2: Универсальный обработчик кнопок (Callback) ---
-@router.callback_query()
+# --- Шаг 2: Обработчик нажатия на inline-кнопку ---
+@router.message_callback()
 async def handle_callbacks(callback):
     print(f"=== ОТЛАДКА: НАЖАТА КНОПКА. PAYLOAD: {callback.payload} ===")
     
     if callback.payload == "captcha_passed":
         try:
-            # Безопасный поиск user_id (в разных версиях библиотеки он лежит в разных местах)
-            user_id = None
-            if hasattr(callback, 'user') and hasattr(callback.user, 'user_id'):
-                user_id = callback.user.user_id
-            elif hasattr(callback, 'message') and hasattr(callback.message, 'sender'):
-                user_id = callback.message.sender.user_id
-            elif hasattr(callback, 'from_user'):
-                user_id = callback.from_user.user_id
-
+            # Безопасно достаем ID из прикрепленного сообщения
+            chat_id = callback.message.recipient.chat_id
+            user_id = callback.message.sender.user_id
+            
             print(f"=== НАЙДЕН USER_ID: {user_id} ===")
             
-            chat_id = callback.message.recipient.chat_id
+            user_states[user_id] = "waiting_text"
             
-            if user_id:
-                user_states[user_id] = "waiting_text"
-            
-            # Отвечаем на колбэк (убираем часики загрузки на кнопке)
+            # Отвечаем на колбэк (убираем часики загрузки)
             try:
                 await callback.answer()
             except Exception:
                 pass
 
-            # Отправляем следующее сообщение напрямую
+            # Отправляем сообщение
             await bot.send_message(
                 chat_id=chat_id, 
                 text="✅ Проверка пройдена! Введите текст вашего объявления (до 500 символов):"
@@ -86,7 +78,7 @@ async def handle_callbacks(callback):
         except Exception as e:
             print(f"!!! ОШИБКА ПРИ ОБРАБОТКЕ КНОПКИ: {e} !!!")
 
-# --- Шаг 3: Обработчик всех текстовых сообщений и фото ---
+# --- Шаг 3: Обработчик текстовых сообщений и фото ---
 @router.message()
 async def handle_message(message: Message):
     user_id = message.sender.user_id
