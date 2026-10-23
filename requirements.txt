@@ -1,2 +1,2 @@
-aiomax-python
+pymaxgram
 python-dotenv
