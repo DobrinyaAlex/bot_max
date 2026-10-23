@@ -26,12 +26,8 @@ router = Router()
 user_states = {}
 user_data = {}
 
-# --- Загрузка фото в MAX (с учётом официальной документации) ---
+# --- Загрузка фото в MAX (с отключением проверки SSL) ---
 async def upload_photo_to_max(photo_url: str) -> str:
-    """
-    Скачивает фото и загружает его на сервер MAX.
-    Возвращает токен вложения для отправки в сообщении.
-    """
     # 1. Скачиваем фото
     async with aiohttp.ClientSession() as session:
         async with session.get(photo_url) as resp:
@@ -39,12 +35,14 @@ async def upload_photo_to_max(photo_url: str) -> str:
                 raise Exception(f"Скачивание: HTTP {resp.status}")
             photo_data = await resp.read()
 
-    # 2. Получаем URL для загрузки (домен platform-api2.max.ru, без Bearer)
-    headers = {"Authorization": BOT_TOKEN}          # ← ключевое исправление
+    # 2. Получаем URL для загрузки (домен platform-api2.max.ru)
+    headers = {"Authorization": f"Bearer {BOT_TOKEN}"}
     async with aiohttp.ClientSession() as session:
+        # ДОБАВЛЕН ПАРАМЕТР ssl=False
         async with session.post(
             "https://platform-api2.max.ru/uploads?type=image",
-            headers=headers
+            headers=headers,
+            ssl=False  # <-- Ключевое исправление
         ) as resp:
             if resp.status != 200:
                 text = await resp.text()
@@ -58,13 +56,13 @@ async def upload_photo_to_max(photo_url: str) -> str:
     async with aiohttp.ClientSession() as session:
         form = aiohttp.FormData()
         form.add_field('data', photo_data, filename='photo.jpg')
-        async with session.post(upload_url, data=form) as resp:
+        # ДОБАВЛЕН ПАРАМЕТР ssl=False
+        async with session.post(upload_url, data=form, ssl=False) as resp:
             if resp.status != 200:
                 text = await resp.text()
                 raise Exception(f"Загрузка файла: HTTP {resp.status} {text}")
             upload_result = await resp.json()
 
-            # Ищем токен: может быть в корне или внутри photos
             token = upload_result.get("token")
             if not token:
                 photos = upload_result.get("photos", {})
@@ -120,7 +118,6 @@ async def handle_message(message: Message):
 
         state = user_states[chat_id]
 
-        # --- Шаг 1: текст ---
         if state == "waiting_text":
             if len(text) > 500:
                 await bot.send_message(chat_id=chat_id, text="❌ Текст слишком длинный. Максимум 500 символов.")
@@ -129,7 +126,6 @@ async def handle_message(message: Message):
             user_states[chat_id] = "waiting_photo"
             await bot.send_message(chat_id=chat_id, text="Текст принят! Отправьте фотографию (или напишите «Пропустить»).")
 
-        # --- Шаг 2: фото ---
         elif state == "waiting_photo":
             if getattr(message.body, 'attachments', None):
                 user_data[chat_id]['photo'] = message.body.attachments[0].payload.url
@@ -142,13 +138,11 @@ async def handle_message(message: Message):
             else:
                 await bot.send_message(chat_id=chat_id, text="Пожалуйста, отправьте фото или напишите «Пропустить».")
 
-        # --- Шаг 3: имя ---
         elif state == "waiting_name":
             user_data[chat_id]['name'] = text
             user_states[chat_id] = "waiting_phone"
             await bot.send_message(chat_id=chat_id, text="Имя принято. Теперь укажите контактный телефон.")
 
-        # --- Шаг 4: телефон и публикация ---
         elif state == "waiting_phone":
             user_data[chat_id]['phone'] = text
             post_text = (
@@ -165,7 +159,6 @@ async def handle_message(message: Message):
                     attachment_token = await upload_photo_to_max(photo_url)
                     attachments = [{"type": "image", "payload": {"token": attachment_token}}]
 
-                    # Пытаемся отправить до 3 раз с паузами (на случай, если файл ещё обрабатывается)
                     for attempt in range(3):
                         try:
                             await bot.send_message(
@@ -178,11 +171,10 @@ async def handle_message(message: Message):
                         except Exception as e:
                             err_str = str(e).lower()
                             if "attachment.not.ready" in err_str and attempt < 2:
-                                await asyncio.sleep(2 * (attempt + 1))   # 2, 4 сек
+                                await asyncio.sleep(2 * (attempt + 1))
                                 continue
                             raise e
                 except Exception as e:
-                    # Выводим точную ошибку в чат для диагностики
                     error_msg = str(e)
                     print(f"!!! ОШИБКА ФОТО: {error_msg} !!!")
                     await bot.send_message(
@@ -194,11 +186,9 @@ async def handle_message(message: Message):
                         text=f"✅ Объявление опубликовано текстом.\n\n⚠️ Ошибка фото: {error_msg}"
                     )
             else:
-                # Фото не было — отправляем только текст
                 await bot.send_message(chat_id=ADMIN_CHAT_ID, text=post_text)
                 await bot.send_message(chat_id=chat_id, text="✅ Спасибо! Ваше объявление опубликовано в канале.")
 
-            # Очищаем состояние
             del user_states[chat_id]
             del user_data[chat_id]
 
