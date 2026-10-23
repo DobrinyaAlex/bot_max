@@ -4,26 +4,43 @@ import os
 from maxgram import Bot, Dispatcher, Router
 from maxgram.types import BotStarted, Message
 
+# --- Конфигурация ---
 BOT_TOKEN = os.getenv("MAX_BOT_TOKEN")
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
+
+# Безопасно получаем ID админа, чтобы скрипт не падал, если там пробел или буква
+try:
+    ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
+except ValueError:
+    print("!!! ВНИМАНИЕ: ADMIN_CHAT_ID задан неверно. Укажите только цифры !!!")
+    ADMIN_CHAT_ID = 0
+
+if not BOT_TOKEN:
+    raise ValueError("Не задана переменная окружения MAX_BOT_TOKEN")
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 
-# --- Хранилища данных (вместо FSM) ---
-# Здесь мы храним, на каком шаге сейчас пользователь
-user_states = {} 
-# Здесь мы храним собранные данные объявления
+# --- Хранилища данных ---
+user_states = {}
 user_data = {}
 
 # --- Обработчик кнопки "Начать" ---
 @router.bot_started()
 async def on_start(event: BotStarted):
-    user_id = event.user.id
+    print("=== ОТЛАДКА: СРАБОТАЛ ОБРАБОТЧИК КНОПКИ 'НАЧАТЬ' ===")
+    
+    # ИСПРАВЛЕНИЕ: берем user_id правильно
+    try:
+        user_id = event.user.user_id 
+    except AttributeError:
+        user_id = event.chat_id # Запасной вариант
+
+    print(f"=== ID ПОЛЬЗОВАТЕЛЯ: {user_id} ===")
+
     user_states[user_id] = "waiting_text"
-    user_data[user_id] = {} # Очищаем старые данные
+    user_data[user_id] = {}
 
     rules_text = (
         "Здравствуйте! Я помогу оформить объявление.\n\n"
@@ -31,17 +48,23 @@ async def on_start(event: BotStarted):
         "1. Текст объявления — до 500 символов.\n"
         "2. Фотография — 1 шт.\n"
         "3. Имя и телефон для связи.\n\n"
-        "✅ Проверка пройдена! Введите текст вашего объявления:"
+        "✅ Введите текст вашего объявления:"
     )
-    await event.answer(text=rules_text)
+    
+    try:
+        await event.answer(text=rules_text)
+        print("=== ОТЛАДКА: ПРИВЕТСТВИЕ УСПЕШНО ОТПРАВЛЕНО ===")
+    except Exception as e:
+        print(f"!!! ОШИБКА ОТПРАВКИ ПРИВЕТСТВИЯ: {e} !!!")
 
-# --- Обработчик всех текстовых сообщений ---
+# --- Обработчик всех сообщений ---
 @router.message()
 async def handle_message(message: Message):
     user_id = message.sender.user_id
     text = message.body.text if message.body.text else ""
     
-    # Если пользователь новый и не нажимал "Начать"
+    print(f"=== ОТЛАДКА: ПОЛУЧЕНО СООБЩЕНИЕ ОТ {user_id}: {text} ===")
+
     if user_id not in user_states:
         await message.answer("Пожалуйста, нажмите кнопку 'Начать' в меню бота.")
         return
@@ -61,7 +84,6 @@ async def handle_message(message: Message):
     # Шаг 2: Ловим фото
     elif state == "waiting_photo":
         if message.body.attachments:
-            # Достаем URL фото
             photo_url = message.body.attachments[0].payload.url
             user_data[user_id]['photo'] = photo_url
             user_states[user_id] = "waiting_name"
@@ -83,7 +105,6 @@ async def handle_message(message: Message):
     elif state == "waiting_phone":
         user_data[user_id]['phone'] = text
         
-        # Формируем сообщение для админа
         admin_text = (
             f"📥 **Новое объявление на проверку**\n\n"
             f"**Текст:** {user_data[user_id].get('ad_text')}\n"
@@ -98,16 +119,15 @@ async def handle_message(message: Message):
             await bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_text)
             await message.answer("✅ Спасибо! Ваше объявление отправлено на проверку.")
         except Exception as e:
-            logging.error(f"Ошибка отправки админу: {e}")
-            await message.answer("Произошла ошибка при отправке.")
+            print(f"!!! ОШИБКА ОТПРАВКИ АДМИНУ: {e} !!!")
+            await message.answer("Произошла ошибка при отправке (проверьте ADMIN_CHAT_ID).")
 
-        # Очищаем состояние после завершения
         del user_states[user_id]
         del user_data[user_id]
 
 async def main():
     dp.include_router(router)
-    print("=== БОТ ЗАПУЩЕН (БЕЗ FSM) ===")
+    print("=== БОТ УСПЕШНО ЗАПУЩЕН (БЕЗ FSM) ===")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
