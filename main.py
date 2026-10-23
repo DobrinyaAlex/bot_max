@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 import aiohttp
-import io
 from maxgram import Bot, Dispatcher, Router
 from maxgram.types import BotStarted, Message
 from maxgram.utils.keyboard import InlineKeyboardBuilder
@@ -97,7 +96,6 @@ async def handle_message(message: Message):
 
         elif state == "waiting_photo":
             if getattr(message.body, 'attachments', None):
-                # Сохраняем ссылку на фото
                 photo_url = message.body.attachments[0].payload.url
                 user_data[chat_id]['photo'] = photo_url
                 user_states[chat_id] = "waiting_name"
@@ -125,36 +123,70 @@ async def handle_message(message: Message):
             )
 
             photo_url = user_data[chat_id].get('photo')
-            
+            attachment_token = None
+
             if photo_url:
                 try:
-                    # СКАЧИВАЕМ ФОТО В ПАМЯТЬ
+                    # 1. Скачиваем фото по ссылке
                     async with aiohttp.ClientSession() as session:
                         async with session.get(photo_url) as resp:
                             if resp.status == 200:
                                 photo_data = await resp.read()
-                                
-                                # ОТПРАВЛЯЕМ СКАЧАННОЕ ФОТО В КАНАЛ
-                                await bot.send_photo(
-                                    chat_id=ADMIN_CHAT_ID, 
-                                    photo=photo_data, 
-                                    caption=post_text
-                                )
-                                await bot.send_message(chat_id=chat_id, text="✅ Спасибо! Ваше объявление с фото опубликовано в канале.")
                             else:
                                 raise Exception(f"Не удалось скачать фото (HTTP {resp.status})")
+
+                    # 2. Запрашиваем URL для загрузки на сервер MAX
+                    headers = {"Authorization": f"Bearer {BOT_TOKEN}"}
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post("https://platform-api2.max.ru/uploads?type=image", headers=headers) as resp:
+                            if resp.status == 200:
+                                upload_data = await resp.json()
+                                upload_url = upload_data.get("url")
+                                if not upload_url:
+                                    raise Exception("Не удалось получить URL для загрузки")
+                            else:
+                                raise Exception(f"Ошибка запроса URL: HTTP {resp.status}")
+
+                    # 3. Загружаем фото на сервер MAX
+                    async with aiohttp.ClientSession() as session:
+                        form_data = aiohttp.FormData()
+                        form_data.add_field('data', photo_data, filename='photo.jpg')
+                        async with session.post(upload_url, data=form_data) as resp:
+                            if resp.status == 200:
+                                upload_result = await resp.json()
+                                # Извлекаем токен (структура ответа может отличаться)
+                                attachment_token = upload_result.get("token")
+                                if not attachment_token:
+                                    # Пробуем другие возможные поля
+                                    attachment_token = upload_result.get("photos", {}).get("token")
+                                if not attachment_token:
+                                    raise Exception(f"Не удалось получить токен вложения. Ответ: {upload_result}")
+                            else:
+                                raise Exception(f"Ошибка загрузки фото: HTTP {resp.status}")
+
                 except Exception as e:
-                    print(f"!!! ОШИБКА СКАЧИВАНИЯ/ОТПРАВКИ ФОТО: {e} !!!")
-                    # Если не получилось с фото, отправляем хотя бы текст
-                    await bot.send_message(chat_id=ADMIN_CHAT_ID, text=post_text + "\n\n(Фото не загрузилось)")
-                    await bot.send_message(chat_id=chat_id, text="✅ Объявление опубликовано (текстом, т.к. фото не загрузилось).")
-            else:
-                # Если фото пропущено изначально
-                try:
+                    print(f"!!! ОШИБКА ПОДГОТОВКИ ФОТО: {e} !!!")
+                    # Если что-то пошло не так, отправляем текст с ссылкой
+                    await bot.send_message(chat_id=ADMIN_CHAT_ID, text=post_text + f"\n\n(Ссылка на фото: {photo_url})")
+                    await bot.send_message(chat_id=chat_id, text="✅ Объявление опубликовано (текстом, т.к. фото не удалось загрузить).")
+                    del user_states[chat_id]
+                    del user_data[chat_id]
+                    return
+
+            # 4. Отправляем сообщение в канал
+            try:
+                if attachment_token:
+                    # Используем токен для отправки изображения
+                    attachments = [{"type": "image", "payload": {"token": attachment_token}}]
+                    await bot.send_message(chat_id=ADMIN_CHAT_ID, text=post_text, attachments=attachments)
+                else:
+                    # Если фото не было
                     await bot.send_message(chat_id=ADMIN_CHAT_ID, text=post_text)
-                    await bot.send_message(chat_id=chat_id, text="✅ Спасибо! Ваше объявление опубликовано в канале.")
-                except Exception as e:
-                    print(f"!!! ОШИБКА ОТПРАВКИ ТЕКСТА: {e} !!!")
+                
+                await bot.send_message(chat_id=chat_id, text="✅ Спасибо! Ваше объявление успешно опубликовано в канале.")
+            except Exception as e:
+                print(f"!!! ОШИБКА ОТПРАВКИ ПОСТА: {e} !!!")
+                await bot.send_message(chat_id=chat_id, text=f"❌ Ошибка публикации: {e}")
             
             del user_states[chat_id]
             del user_data[chat_id]
