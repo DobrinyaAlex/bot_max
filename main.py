@@ -11,7 +11,6 @@ BOT_TOKEN = os.getenv("MAX_BOT_TOKEN")
 try:
     ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 except ValueError:
-    print("!!! ВНИМАНИЕ: ADMIN_CHAT_ID задан неверно. Укажите только цифры !!!")
     ADMIN_CHAT_ID = 0
 
 if not BOT_TOKEN:
@@ -22,14 +21,14 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 
-# --- Хранилища данных (используем chat_id в качестве ключа!) ---
+# --- Хранилища данных ---
 user_states = {}
 user_data = {}
 
 # --- Шаг 1: Обработчик кнопки "Начать" ---
 @router.bot_started()
 async def on_start(event: BotStarted):
-    chat_id = event.chat_id  # Используем ID чата
+    chat_id = event.chat_id
     user_states[chat_id] = "waiting_captcha"
     user_data[chat_id] = {}
 
@@ -47,7 +46,6 @@ async def on_start(event: BotStarted):
     
     try:
         await bot.send_message(chat_id=chat_id, text=rules_text, keyboard=kb)
-        print(f"=== ОТПРАВЛЕНО ПРИВЕТСТВИЕ В ЧАТ {chat_id} ===")
     except Exception as e:
         print(f"!!! ОШИБКА ОТПРАВКИ ПРИВЕТСТВИЯ: {e} !!!")
 
@@ -56,10 +54,7 @@ async def on_start(event: BotStarted):
 async def handle_callbacks(callback):
     if getattr(callback, 'payload', None) == "captcha_passed":
         try:
-            chat_id = callback.message.recipient.chat_id  # Берем ID чата
-            
-            print(f"=== НАЖАТА КНОПКА В ЧАТЕ {chat_id} ===")
-            
+            chat_id = callback.message.recipient.chat_id
             user_states[chat_id] = "waiting_text"
             
             try:
@@ -71,8 +66,6 @@ async def handle_callbacks(callback):
                 chat_id=chat_id, 
                 text="✅ Проверка пройдена! Введите текст вашего объявления (до 500 символов):"
             )
-            print("=== ОТВЕТ НА КНОПКУ УСПЕШНО ОТПРАВЛЕН ===")
-            
         except Exception as e:
             print(f"!!! ОШИБКА ПРИ ОБРАБОТКЕ КНОПКИ: {e} !!!")
 
@@ -80,21 +73,16 @@ async def handle_callbacks(callback):
 @router.message()
 async def handle_message(message: Message):
     try:
-        chat_id = message.recipient.chat_id  # Берем ID чата
-        
+        chat_id = message.recipient.chat_id
         text = ""
         if getattr(message, 'body', None) and getattr(message.body, 'text', None):
             text = message.body.text
-            
-        print(f"=== ПОЛУЧЕНО СООБЩЕНИЕ В ЧАТ {chat_id}: {text} ===")
 
         if chat_id not in user_states:
-            print("!!! ЧАТ НЕ НАЙДЕН В ПАМЯТИ. ОТПРАВЛЯЕМ ПРИГЛАШЕНИЕ !!!")
             await bot.send_message(chat_id=chat_id, text="Пожалуйста, нажмите кнопку 'Начать' в меню бота.")
             return
 
         state = user_states[chat_id]
-        print(f"=== ТЕКУЩЕЕ СОСТОЯНИЕ: {state} ===")
 
         # Ждем текст
         if state == "waiting_text":
@@ -126,33 +114,49 @@ async def handle_message(message: Message):
             user_states[chat_id] = "waiting_phone"
             await bot.send_message(chat_id=chat_id, text="Имя принято. Теперь укажите контактный телефон.")
 
-        # Ждем телефон и отправляем
+        # Ждем телефон и публикуем в канал
         elif state == "waiting_phone":
             user_data[chat_id]['phone'] = text
             
-            admin_text = (
-                f"📥 **Новое объявление на проверку**\n\n"
-                f"**Текст:** {user_data[chat_id].get('ad_text')}\n"
-                f"**Имя:** {user_data[chat_id].get('name')}\n"
-                f"**Телефон:** {text}\n"
-                f"**ID чата:** {chat_id}"
+            # Формируем красивый текст для поста
+            post_text = (
+                f"📌 **Объявление**\n\n"
+                f"{user_data[chat_id].get('ad_text')}\n\n"
+                f"👤 **Продавец:** {user_data[chat_id].get('name')}\n"
+                f"📞 **Телефон:** {text}"
             )
-            if user_data[chat_id].get('photo'):
-                admin_text += f"\n**Фото:** {user_data[chat_id].get('photo')}"
 
             try:
-                print(f"=== ОТПРАВЛЯЕМ ЗАЯВКУ НА ID: {ADMIN_CHAT_ID} ===")
-                await bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_text)
-                await bot.send_message(chat_id=chat_id, text="✅ Спасибо! Ваше объявление отправлено на проверку.")
+                photo_url = user_data[chat_id].get('photo')
+                if photo_url:
+                    # Отправляем фото с подписью (как настоящий пост)
+                    await bot.send_photo(
+                        chat_id=ADMIN_CHAT_ID, 
+                        photo=photo_url, 
+                        caption=post_text
+                    )
+                else:
+                    # Если фото нет, отправляем просто текст
+                    await bot.send_message(
+                        chat_id=ADMIN_CHAT_ID, 
+                        text=post_text
+                    )
+                
+                await bot.send_message(chat_id=chat_id, text="✅ Спасибо! Ваше объявление успешно опубликовано в канале.")
             except Exception as e:
-                print(f"!!! ОШИБКА ОТПРАВКИ АДМИНУ: {e} !!!")
-                await bot.send_message(chat_id=chat_id, text=f"❌ Ошибка отправки администратору.\n\nТекст ошибки: {e}")
+                print(f"!!! ОШИБКА ОТПРАВКИ ПОСТА: {e} !!!")
+                # Если случилась ошибка, пробуем отправить хотя бы текстом
+                try:
+                    await bot.send_message(chat_id=ADMIN_CHAT_ID, text=post_text)
+                    await bot.send_message(chat_id=chat_id, text="✅ Объявление опубликовано (без фото).")
+                except:
+                    await bot.send_message(chat_id=chat_id, text=f"❌ Ошибка публикации.\n\nТекст ошибки: {e}")
             
             del user_states[chat_id]
             del user_data[chat_id]
 
     except Exception as e:
-        print(f"!!! КРИТИЧЕСКАЯ ОШИБКА В ОБРАБОТЧИКЕ СООБЩЕНИЙ: {e} !!!")
+        print(f"!!! КРИТИЧЕСКАЯ ОШИБКА В ОБРАБОТЧИКЕ: {e} !!!")
 
 async def main():
     dp.include_router(router)
