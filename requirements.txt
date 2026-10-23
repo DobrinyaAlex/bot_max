@@ -1,0 +1,2 @@
+aiomax-python
+python-dotenv
