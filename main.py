@@ -22,7 +22,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 
-# --- Хранилища данных (вместо FSM) ---
+# --- Хранилища данных ---
 user_states = {}
 user_data = {}
 
@@ -30,12 +30,9 @@ user_data = {}
 @router.bot_started()
 async def on_start(event: BotStarted):
     user_id = event.user.user_id 
-    
-    # Ставим состояние "ожидание капчи"
     user_states[user_id] = "waiting_captcha"
     user_data[user_id] = {}
 
-    # Создаем inline-кнопку для проверки
     kb = InlineKeyboardBuilder()
     kb.callback(text="✅ Я человек / Продолжить", payload="captcha_passed")
 
@@ -50,14 +47,35 @@ async def on_start(event: BotStarted):
     
     await event.answer(text=rules_text, keyboard=kb)
 
-# --- Шаг 2: Обработчик нажатия на кнопку ---
-@router.message_callback(lambda call: call.payload == "captcha_passed")
-async def process_captcha(callback):
-    user_id = callback.sender.user_id
-    user_states[user_id] = "waiting_text"
+# --- Шаг 2: Универсальный обработчик кнопок (Callback) ---
+@router.callback_query()
+async def handle_callbacks(callback):
+    print(f"=== ОТЛАДКА: НАЖАТА КНОПКА. PAYLOAD: {callback.payload} ===")
     
-    await callback.answer(notification="Проверка пройдена!")
-    await callback.message.answer("✅ Проверка пройдена! Введите текст вашего объявления (до 500 символов):")
+    # Проверяем, что нажата именно наша кнопка
+    if callback.payload == "captcha_passed":
+        try:
+            # Безопасно достаем ID
+            user_id = callback.sender.user_id
+            chat_id = callback.message.recipient.chat_id
+            
+            user_states[user_id] = "waiting_text"
+            
+            # Отвечаем на колбэк (убираем часики загрузки на кнопке)
+            try:
+                await callback.answer()
+            except Exception:
+                pass
+
+            # Отправляем сообщение напрямую
+            await bot.send_message(
+                chat_id=chat_id, 
+                text="✅ Проверка пройдена! Введите текст вашего объявления (до 500 символов):"
+            )
+            print("=== ОТЛАДКА: ОТВЕТ НА КНОПКУ УСПЕШНО ОТПРАВЛЕН ===")
+            
+        except Exception as e:
+            print(f"!!! ОШИБКА ПРИ ОБРАБОТКЕ КНОПКИ: {e} !!!")
 
 # --- Шаг 3: Обработчик всех текстовых сообщений и фото ---
 @router.message()
@@ -65,7 +83,6 @@ async def handle_message(message: Message):
     user_id = message.sender.user_id
     text = message.body.text if message.body.text else ""
     
-    # Если пользователь не нажимал "Начать"
     if user_id not in user_states:
         await message.answer("Пожалуйста, нажмите кнопку 'Начать' в меню бота.")
         return
@@ -121,11 +138,9 @@ async def handle_message(message: Message):
             await bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_text)
             await message.answer("✅ Спасибо! Ваше объявление отправлено на проверку.")
         except Exception as e:
-            # Выводим настоящую ошибку в чат, чтобы понять причину
             print(f"!!! ОШИБКА ОТПРАВКИ АДМИНУ: {e} !!!")
             await message.answer(f"❌ Ошибка отправки администратору.\n\nТекст ошибки от MAX: {e}")
         
-        # Очищаем данные
         del user_states[user_id]
         del user_data[user_id]
 
