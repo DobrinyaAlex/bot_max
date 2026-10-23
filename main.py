@@ -6,9 +6,7 @@ from maxgram import Bot, Dispatcher, Router
 from maxgram.types import BotStarted, Message
 from maxgram.utils.keyboard import InlineKeyboardBuilder
 
-# --- Конфигурация ---
 BOT_TOKEN = os.getenv("MAX_BOT_TOKEN")
-
 try:
     ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 except ValueError:
@@ -22,27 +20,24 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 
-# --- Хранилища данных ---
 user_states = {}
 user_data = {}
 
-# --- Загрузка фото в MAX (с отключением проверки SSL) ---
 async def upload_photo_to_max(photo_url: str) -> str:
     # 1. Скачиваем фото
     async with aiohttp.ClientSession() as session:
-        async with session.get(photo_url) as resp:
+        async with session.get(photo_url, ssl=False) as resp:
             if resp.status != 200:
                 raise Exception(f"Скачивание: HTTP {resp.status}")
             photo_data = await resp.read()
 
     # 2. Получаем URL для загрузки (домен platform-api2.max.ru)
-    headers = {"Authorization": f"Bearer {BOT_TOKEN}"}
+    headers = {"Authorization": BOT_TOKEN}  # БЕЗ префикса Bearer
     async with aiohttp.ClientSession() as session:
-        # ДОБАВЛЕН ПАРАМЕТР ssl=False
         async with session.post(
             "https://platform-api2.max.ru/uploads?type=image",
             headers=headers,
-            ssl=False  # <-- Ключевое исправление
+            ssl=False
         ) as resp:
             if resp.status != 200:
                 text = await resp.text()
@@ -56,32 +51,31 @@ async def upload_photo_to_max(photo_url: str) -> str:
     async with aiohttp.ClientSession() as session:
         form = aiohttp.FormData()
         form.add_field('data', photo_data, filename='photo.jpg')
-        # ДОБАВЛЕН ПАРАМЕТР ssl=False
         async with session.post(upload_url, data=form, ssl=False) as resp:
             if resp.status != 200:
                 text = await resp.text()
                 raise Exception(f"Загрузка файла: HTTP {resp.status} {text}")
             upload_result = await resp.json()
 
-            token = upload_result.get("token")
+            # Извлекаем токен (для изображений он в photos.*.token)
+            token = None
+            photos = upload_result.get("photos", {})
+            if isinstance(photos, dict) and photos:
+                token = next(iter(photos.values())).get("token")
             if not token:
-                photos = upload_result.get("photos", {})
-                if isinstance(photos, dict) and photos:
-                    token = next(iter(photos.values())).get("token")
+                # Запасной вариант, если токен в корне
+                token = upload_result.get("token")
             if not token:
                 raise Exception(f"Токен не найден в ответе: {upload_result}")
             return token
 
-# --- Обработчики ---
 @router.bot_started()
 async def on_start(event: BotStarted):
     chat_id = event.chat_id
     user_states[chat_id] = "waiting_captcha"
     user_data[chat_id] = {}
-
     kb = InlineKeyboardBuilder()
     kb.callback(text="✅ Я человек / Продолжить", payload="captcha_passed")
-
     rules_text = (
         "Здравствуйте! Я помогу оформить объявление.\n\n"
         "📌 **Правила оформления:**\n"
@@ -111,11 +105,9 @@ async def handle_message(message: Message):
     try:
         chat_id = message.recipient.chat_id
         text = getattr(message.body, 'text', '') or ""
-
         if chat_id not in user_states:
             await bot.send_message(chat_id=chat_id, text="Пожалуйста, нажмите 'Начать' в меню бота.")
             return
-
         state = user_states[chat_id]
 
         if state == "waiting_text":
@@ -151,14 +143,11 @@ async def handle_message(message: Message):
                 f"👤 **Продавец:** {user_data[chat_id].get('name')}\n"
                 f"📞 **Телефон:** {text}"
             )
-
             photo_url = user_data[chat_id].get('photo')
-
             if photo_url:
                 try:
                     attachment_token = await upload_photo_to_max(photo_url)
                     attachments = [{"type": "image", "payload": {"token": attachment_token}}]
-
                     for attempt in range(3):
                         try:
                             await bot.send_message(
@@ -188,10 +177,8 @@ async def handle_message(message: Message):
             else:
                 await bot.send_message(chat_id=ADMIN_CHAT_ID, text=post_text)
                 await bot.send_message(chat_id=chat_id, text="✅ Спасибо! Ваше объявление опубликовано в канале.")
-
             del user_states[chat_id]
             del user_data[chat_id]
-
     except Exception as e:
         print(f"!!! КРИТИЧЕСКАЯ ОШИБКА В ОБРАБОТЧИКЕ: {e} !!!")
 
