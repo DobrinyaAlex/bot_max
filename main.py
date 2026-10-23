@@ -21,50 +21,45 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 
-# --- Хранилища ---
+# --- Хранилища данных ---
 user_states = {}
 user_data = {}
-moderation_messages = {}  # Для хранения ID сообщений, отправленных на модерацию
 
-# --- Загрузка фото в MAX (без изменений) ---
+# --- Функция загрузки фото в MAX ---
 async def upload_photo_to_max(photo_url: str) -> str:
+    # 1. Скачиваем фото
     async with aiohttp.ClientSession() as session:
         async with session.get(photo_url, ssl=False) as resp:
             if resp.status != 200:
                 raise Exception(f"Скачивание: HTTP {resp.status}")
             photo_data = await resp.read()
 
+    # 2. Получаем URL для загрузки
     headers = {"Authorization": BOT_TOKEN}
     async with aiohttp.ClientSession() as session:
         async with session.post(
             "https://platform-api2.max.ru/uploads?type=image",
-            headers=headers,
-            ssl=False
+            headers=headers, ssl=False
         ) as resp:
             if resp.status != 200:
-                text = await resp.text()
-                raise Exception(f"Запрос URL: HTTP {resp.status} {text}")
-            upload_data = await resp.json()
-            upload_url = upload_data.get("url")
-            if not upload_url:
-                raise Exception(f"Не получен URL для загрузки: {upload_data}")
+                raise Exception(f"Запрос URL: HTTP {resp.status}")
+            upload_url = (await resp.json()).get("url")
 
+    # 3. Загружаем файл
     async with aiohttp.ClientSession() as session:
         form = aiohttp.FormData()
         form.add_field('data', photo_data, filename='photo.jpg')
         async with session.post(upload_url, data=form, ssl=False) as resp:
             if resp.status != 200:
-                text = await resp.text()
-                raise Exception(f"Загрузка файла: HTTP {resp.status} {text}")
-            upload_result = await resp.json()
-            token = None
-            photos = upload_result.get("photos", {})
-            if isinstance(photos, dict) and photos:
-                token = next(iter(photos.values())).get("token")
+                raise Exception(f"Загрузка: HTTP {resp.status}")
+            res = await resp.json()
+            token = res.get("token")
             if not token:
-                token = upload_result.get("token")
+                photos = res.get("photos", {})
+                if isinstance(photos, dict) and photos:
+                    token = next(iter(photos.values())).get("token")
             if not token:
-                raise Exception(f"Токен не найден: {upload_result}")
+                raise Exception(f"Токен не найден: {res}")
             return token
 
 # --- Обработчики ---
@@ -95,7 +90,6 @@ async def handle_captcha(callback):
         pass
     await bot.send_message(chat_id=chat_id, text="✅ Проверка пройдена! Введите текст вашего объявления (до 500 символов):")
 
-# --- Сбор данных ---
 @router.message()
 async def handle_message(message: Message):
     try:
@@ -116,18 +110,22 @@ async def handle_message(message: Message):
             user_data[chat_id]['ad_text'] = text
             user_data[chat_id]['photos'] = []
             user_states[chat_id] = "waiting_photos"
-            await bot.send_message(chat_id=chat_id, text="Текст принят! Отправьте фотографии (до 5 штук). После каждой фотографии пишите «Ещё» или «Готово».")
+            await bot.send_message(chat_id=chat_id, text="Текст принят! Отправьте до 5 фотографий (можно альбомом). После этого напишите «Готово».")
 
-        # Шаг 2: фото (до 5)
+        # Шаг 2: фото
         elif state == "waiting_photos":
             if getattr(message.body, 'attachments', None):
-                photo_url = message.body.attachments[0].payload.url
-                user_data[chat_id]['photos'].append(photo_url)
+                added = 0
+                for att in message.body.attachments:
+                    if getattr(att, 'type', 'image') == 'image':
+                        user_data[chat_id]['photos'].append(att.payload.url)
+                        added += 1
+                
                 count = len(user_data[chat_id]['photos'])
                 if count >= 5:
                     user_states[chat_id] = "waiting_name"
-                    await bot.send_message(chat_id=chat_id, text="Принято 5 фотографий. Теперь укажите имя продавца.")
-                else:
+                    await bot.send_message(chat_id=chat_id, text="Принято 5 фотографий (максимум). Теперь укажите имя продавца.")
+                elif added > 0:
                     await bot.send_message(chat_id=chat_id, text=f"Фото {count}/5 принято. Отправьте ещё или напишите «Готово».")
             elif text.lower() == "готово":
                 user_states[chat_id] = "waiting_name"
@@ -159,58 +157,26 @@ async def handle_message(message: Message):
                         token = await upload_photo_to_max(url)
                         attachments.append({"type": "image", "payload": {"token": token}})
                 except Exception as e:
-                    error_msg = str(e)
-                    print(f"!!! ОШИБКА ЗАГРУЗКИ ФОТО: {error_msg} !!!")
-                    await bot.send_message(chat_id=chat_id, text=f"⚠️ Не удалось загрузить некоторые фото: {error_msg}")
-                    # Продолжаем без фото
-
-            # Клавиатура модерации
-            kb = InlineKeyboardBuilder()
-            kb.callback(text="✅ Опубликовать", payload="approve")
-            kb.callback(text="❌ Отклонить", payload="reject")
+                    print(f"⚠️ Ошибка загрузки фото: {e}")
+                    await bot.send_message(chat_id=chat_id, text=f"⚠️ Не удалось загрузить некоторые фото: {e}")
 
             try:
-                sent_message = await bot.send_message(
+                # Отправляем пост в канал без кнопок
+                await bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
                     text=post_text,
-                    attachments=attachments if attachments else None,
-                    keyboard=kb
+                    attachments=attachments if attachments else None
                 )
-                # Сохраняем ID сообщения для модерации
-                moderation_messages[sent_message.message_id] = {
-                    "chat_id": ADMIN_CHAT_ID,
-                    "photos": photos
-                }
-                await bot.send_message(chat_id=chat_id, text="✅ Спасибо! Ваше объявление отправлено на модерацию.")
+                await bot.send_message(chat_id=chat_id, text="✅ Спасибо! Объявление успешно опубликовано в канале.")
             except Exception as e:
-                print(f"!!! ОШИБКА ПУБЛИКАЦИИ: {e} !!!")
                 await bot.send_message(chat_id=chat_id, text=f"❌ Ошибка публикации: {e}")
 
+            # Очищаем состояние
             del user_states[chat_id]
             del user_data[chat_id]
 
     except Exception as e:
         print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: {e} !!!")
-
-# --- Обработчики кнопок модерации ---
-@router.message_callback(F.payload == "approve")
-async def approve_post(callback):
-    try:
-        # Убираем клавиатуру (оставляем пост)
-        await callback.message.edit(reply_markup=None)
-        await callback.answer(notification="Объявление одобрено.")
-        # Уведомляем автора? Можно добавить.
-    except Exception as e:
-        print(f"Ошибка одобрения: {e}")
-
-@router.message_callback(F.payload == "reject")
-async def reject_post(callback):
-    try:
-        # Удаляем сообщение из канала
-        await bot.delete_message(chat_id=callback.message.recipient.chat_id, message_id=callback.message.message_id)
-        await callback.answer(notification="Объявление отклонено и удалено.")
-    except Exception as e:
-        print(f"Ошибка отклонения: {e}")
 
 async def main():
     dp.include_router(router)
