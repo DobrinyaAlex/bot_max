@@ -60,7 +60,8 @@ def save_limits(data):
     with open(LIMITS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
-def check_and_update_limit(user_id: int, max_ads: int = 6) -> bool:
+def get_user_limits(user_id: int, max_ads: int = 6) -> dict:
+    """Возвращает информацию о лимитах пользователя (использовано, осталось, максимум)"""
     limits = load_limits()
     today = datetime.date.today().isoformat()
     user_key = str(user_id)
@@ -71,12 +72,20 @@ def check_and_update_limit(user_id: int, max_ads: int = 6) -> bool:
     if limits[user_key]["date"] != today:
         limits[user_key] = {"date": today, "count": 0}
         
-    if limits[user_key]["count"] >= max_ads:
-        return False
-        
-    limits[user_key]["count"] += 1
+    used = limits[user_key]["count"]
+    return {"used": used, "left": max_ads - used, "max": max_ads}
+
+def increment_user_limit(user_id: int):
+    """Увеличивает счетчик объявлений на 1"""
+    limits = load_limits()
+    today = datetime.date.today().isoformat()
+    user_key = str(user_id)
+    
+    if user_key not in limits or limits[user_key]["date"] != today:
+        limits[user_key] = {"date": today, "count": 1}
+    else:
+        limits[user_key]["count"] += 1
     save_limits(limits)
-    return True
 
 # --- Загрузка фото ---
 async def upload_photo_to_max(photo_url: str) -> str:
@@ -116,13 +125,28 @@ async def upload_photo_to_max(photo_url: str) -> str:
 @router.bot_started()
 async def on_start(event: BotStarted):
     chat_id = event.chat_id
+    user_id = event.user.user_id
+    
+    # Проверяем лимит сразу при старте
+    limits = get_user_limits(user_id)
+    if limits['left'] <= 0:
+        await bot.send_message(
+            chat_id=chat_id, 
+            text="❌ Вы сегодня исчерпали лимит объявлений (6 из 6). Попробуйте завтра."
+        )
+        return
+        
     user_states[chat_id] = "waiting_captcha"
     user_data[chat_id] = {}
+    
     a, b = random.randint(1, 9), random.randint(1, 9)
     user_data[chat_id]['captcha_answer'] = str(a + b)
+    
     await bot.send_message(
         chat_id=chat_id,
-        text=f"Здравствуйте! Я помогу оформить объявление.\n\nДля подтверждения, что вы человек, решите пример: **{a} + {b}**. Введите только цифру ответа."
+        text=f"Здравствуйте! Я помогу оформить объявление.\n"
+             f"Осталось объявлений на сегодня: **{limits['left']}**.\n\n"
+             f"Для подтверждения, что вы человек, решите пример: **{a} + {b}**. Введите только цифру ответа."
     )
 
 @router.message()
@@ -191,29 +215,25 @@ async def handle_message(message: Message):
             user_states[chat_id] = "waiting_phone"
             await bot.send_message(chat_id=chat_id, text="Имя принято. Укажите контактный телефон.")
 
-        # Шаг 4: Телефон → показываем выбор канала
+        # Шаг 4: Телефон → выбор канала
         elif state == "waiting_phone":
-            # Проверка лимита: теперь 6 объявлений в день
-            if not check_and_update_limit(user_id, max_ads=6):
-                await bot.send_message(
-                    chat_id=chat_id, 
-                    text="❌ Вы превысили лимит объявлений на сегодня (максимум 6). Попробуйте завтра."
-                )
-                del user_states[chat_id]
-                del user_data[chat_id]
-                return
-
             user_data[chat_id]['phone'] = text
             user_states[chat_id] = "waiting_channel"
 
+            limits = get_user_limits(user_id)
             channels = load_channels()
+            
             kb = InlineKeyboardBuilder()
             for i, ch in enumerate(channels):
                 kb.callback(text=ch['name'], payload=f"publish_{i}")
+            
+            # Принудительно ставим кнопки в столбик (по 1 в ряд)
+            if hasattr(kb, 'adjust'):
+                kb.adjust(1)
 
             await bot.send_message(
                 chat_id=chat_id,
-                text="📢 В какой канал опубликовать объявление?",
+                text=f"📢 В какой канал опубликовать объявление?\n\nУ вас осталось объявлений на сегодня: **{limits['left']}**",
                 keyboard=kb
             )
 
@@ -244,10 +264,20 @@ async def handle_channel_choice(callback):
 
     target = channels[idx]
     chat_id = callback.message.recipient.chat_id
+    user_id = callback.sender.user_id # Получаем ID пользователя из callback
     data = user_data.get(chat_id)
 
     if not data or 'phone' not in data:
         await callback.answer(notification="Данные утеряны. Начните заново: /start")
+        return
+
+    # Проверяем лимит еще раз (вдруг в двух вкладках открыли)
+    limits = get_user_limits(user_id)
+    if limits['left'] <= 0:
+        await callback.answer(notification="Лимит исчерпан", show_alert=True)
+        await bot.send_message(chat_id=chat_id, text="❌ Вы исчерпали лимит. Попробуйте завтра.")
+        del user_data[chat_id]
+        del user_states[chat_id]
         return
 
     # Удаляем данные, чтобы повторное нажатие не дублировало публикацию
@@ -277,21 +307,32 @@ async def handle_channel_choice(callback):
     )
 
     try:
+        # Отправляем пост
         await bot.send_message(
             chat_id=target['id'],
             text=post_text,
             attachments=attachments if attachments else None
         )
+        
+        # Списываем лимит и показываем остаток
+        increment_user_limit(user_id)
+        new_limits = get_user_limits(user_id)
+        
         await bot.send_message(
             chat_id=chat_id,
-            text=f"✅ Объявление опубликовано в канал: **{target['name']}**"
+            text=f"✅ Объявление опубликовано в канал: **{target['name']}**\n\n"
+                 f"Осталось объявлений на сегодня: **{new_limits['left']}** из {new_limits['max']}."
         )
     except Exception as e:
         print(f"!!! ОШИБКА ПУБЛИКАЦИИ В {target['name']}: {e} !!!")
         await bot.send_message(
             chat_id=chat_id,
-            text=f"❌ Не удалось опубликовать в «{target['name']}»: {e}"
+            text=f"❌ Не удалось опубликовать в «{target['name']}»: {e}\n"
+                 f"Попробуйте выбрать другой канал или обратитесь к администратору."
         )
+        # Возвращаем данные обратно в память, чтобы он мог выбрать другой канал
+        user_data[chat_id] = data
+        user_states[chat_id] = "waiting_channel"
 
 async def main():
     dp.include_router(router)
