@@ -162,6 +162,11 @@ async def on_start(event: BotStarted):
 async def handle_message(message: Message):
     try:
         chat_id = message.recipient.chat_id
+        
+        # ГЛАВНОЕ ИСПРАВЛЕНИЕ: Игнорируем сообщения из каналов и групп (отрицательный chat_id)
+        if chat_id < 0:
+            return
+            
         text = getattr(message.body, 'text', '').strip()
         user_id = get_user_id(message) or chat_id
 
@@ -245,6 +250,7 @@ async def handle_message(message: Message):
                 keyboard=kb
             )
 
+        # Ожидание выбора канала
         elif state == "waiting_channel":
             await bot.send_message(chat_id=chat_id, text="Пожалуйста, выберите канал из списка выше (нажмите кнопку).")
 
@@ -333,6 +339,8 @@ async def handle_channel_choice(callback):
 async def main():
     dp.include_router(router)
     print("=== БОТ УСПЕШНО ЗАПУЩЕН ===")
+    channels = load_channels()
+    print(f"📢 Доступные каналы: {[c['name'] for c in channels]}")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
