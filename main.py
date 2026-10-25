@@ -67,10 +67,11 @@ async def on_start(event: BotStarted):
     user_data[chat_id] = {}
     kb = InlineKeyboardBuilder()
     kb.callback(text="✅ Я человек / Продолжить", payload="captcha_passed")
+    
     rules_text = (
         "Здравствуйте! Я помогу оформить объявление.\n\n"
         "📌 **Правила оформления:**\n"
-        "1. Текст объявления — до 500 символов.\n"
+        "1. Текст объявления — до 1500 символов.\n"
         "2. Фотографии — до 5 штук.\n"
         "3. Имя и телефон для связи.\n\n"
         "Нажмите кнопку ниже, чтобы подтвердить, что вы человек."
@@ -85,7 +86,7 @@ async def handle_captcha(callback):
         await callback.answer()
     except Exception:
         pass
-    await bot.send_message(chat_id=chat_id, text="✅ Проверка пройдена! Введите текст вашего объявления (до 500 символов):")
+    await bot.send_message(chat_id=chat_id, text="✅ Проверка пройдена! Введите текст вашего объявления (до 1500 символов):")
 
 @router.message()
 async def handle_message(message: Message):
@@ -101,13 +102,21 @@ async def handle_message(message: Message):
 
         # Шаг 1: текст
         if state == "waiting_text":
-            if len(text) > 500:
-                await bot.send_message(chat_id=chat_id, text="❌ Текст слишком длинный. Максимум 500 символов.")
+            if len(text) > 1500:
+                extra = len(text) - 1500
+                await bot.send_message(
+                    chat_id=chat_id, 
+                    text=f"❌ Текст слишком длинный (вы ввели {len(text)} символов). Сократите его на {extra} симв. и отправьте снова."
+                )
                 return
+            
             user_data[chat_id]['ad_text'] = text
             user_data[chat_id]['photos'] = []
             user_states[chat_id] = "waiting_photos"
-            await bot.send_message(chat_id=chat_id, text="Текст принят! Отправьте до 5 фотографий (можно альбомом). После этого напишите «Готово».")
+            await bot.send_message(
+                chat_id=chat_id, 
+                text=f"✅ Текст принят ({len(text)}/1500 символов)! Отправьте до 5 фотографий (можно альбомом). После этого напишите «Готово»."
+            )
 
         # Шаг 2: фото
         elif state == "waiting_photos":
