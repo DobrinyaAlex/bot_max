@@ -2,6 +2,9 @@ import asyncio
 import logging
 import os
 import aiohttp
+import random
+import json
+import datetime
 from maxgram import Bot, Dispatcher, Router, F
 from maxgram.types import BotStarted, Message
 from maxgram.utils.keyboard import InlineKeyboardBuilder
@@ -16,16 +19,66 @@ except ValueError:
 if not BOT_TOKEN:
     raise ValueError("Не задана переменная окружения MAX_BOT_TOKEN")
 
+DATA_DIR = os.getenv("DATA_DIR", "/app/data")
+os.makedirs(DATA_DIR, exist_ok=True)
+LIMITS_FILE = os.path.join(DATA_DIR, "limits.json")
+
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 
-# --- Хранилища данных ---
 user_states = {}
 user_data = {}
 
-# --- Загрузка фото в MAX ---
+# --- Каналы ---
+def load_channels():
+    raw = os.getenv("CHANNELS_JSON", "[]")
+    try:
+        channels = json.loads(raw)
+        valid = []
+        for ch in channels:
+            if isinstance(ch, dict) and 'name' in ch and 'id' in ch:
+                valid.append({"name": str(ch['name']), "id": int(ch['id'])})
+        if valid:
+            return valid
+    except Exception as e:
+        print(f"⚠️ Ошибка парсинга CHANNELS_JSON: {e}")
+    return [{"name": "Основной канал", "id": ADMIN_CHAT_ID}]
+
+# --- Лимиты ---
+def load_limits():
+    if not os.path.exists(LIMITS_FILE):
+        return {}
+    try:
+        with open(LIMITS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_limits(data):
+    with open(LIMITS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+def check_and_update_limit(user_id: int, max_ads: int = 6) -> bool:
+    limits = load_limits()
+    today = datetime.date.today().isoformat()
+    user_key = str(user_id)
+    
+    if user_key not in limits:
+        limits[user_key] = {"date": today, "count": 0}
+        
+    if limits[user_key]["date"] != today:
+        limits[user_key] = {"date": today, "count": 0}
+        
+    if limits[user_key]["count"] >= max_ads:
+        return False
+        
+    limits[user_key]["count"] += 1
+    save_limits(limits)
+    return True
+
+# --- Загрузка фото ---
 async def upload_photo_to_max(photo_url: str) -> str:
     async with aiohttp.ClientSession() as session:
         async with session.get(photo_url, ssl=False) as resp:
@@ -65,60 +118,54 @@ async def on_start(event: BotStarted):
     chat_id = event.chat_id
     user_states[chat_id] = "waiting_captcha"
     user_data[chat_id] = {}
-    kb = InlineKeyboardBuilder()
-    kb.callback(text="✅ Я человек / Продолжить", payload="captcha_passed")
-    
-    rules_text = (
-        "Здравствуйте! Я помогу оформить объявление.\n\n"
-        "📌 **Правила оформления:**\n"
-        "1. Текст объявления — до 1500 символов.\n"
-        "2. Фотографии — до 5 штук.\n"
-        "3. Имя и телефон для связи.\n\n"
-        "Нажмите кнопку ниже, чтобы подтвердить, что вы человек."
+    a, b = random.randint(1, 9), random.randint(1, 9)
+    user_data[chat_id]['captcha_answer'] = str(a + b)
+    await bot.send_message(
+        chat_id=chat_id,
+        text=f"Здравствуйте! Я помогу оформить объявление.\n\nДля подтверждения, что вы человек, решите пример: **{a} + {b}**. Введите только цифру ответа."
     )
-    await bot.send_message(chat_id=chat_id, text=rules_text, keyboard=kb)
-
-@router.message_callback(F.payload == "captcha_passed")
-async def handle_captcha(callback):
-    chat_id = callback.message.recipient.chat_id
-    user_states[chat_id] = "waiting_text"
-    try:
-        await callback.answer()
-    except Exception:
-        pass
-    await bot.send_message(chat_id=chat_id, text="✅ Проверка пройдена! Введите текст вашего объявления (до 1500 символов):")
 
 @router.message()
 async def handle_message(message: Message):
     try:
         chat_id = message.recipient.chat_id
-        text = getattr(message.body, 'text', '') or ""
+        text = getattr(message.body, 'text', '').strip()
+        user_id = message.sender.user_id
 
         if chat_id not in user_states:
-            await bot.send_message(chat_id=chat_id, text="Пожалуйста, нажмите 'Начать' в меню бота.")
+            await bot.send_message(chat_id=chat_id, text="Пожалуйста, нажмите 'Начать' или напишите /start.")
             return
 
         state = user_states[chat_id]
 
-        # Шаг 1: текст
-        if state == "waiting_text":
+        # Шаг 0: Капча
+        if state == "waiting_captcha":
+            if text == user_data[chat_id].get('captcha_answer'):
+                user_states[chat_id] = "waiting_text"
+                await bot.send_message(chat_id=chat_id, text="✅ Проверка пройдена! Введите текст вашего объявления (до 1500 символов):")
+            else:
+                a, b = random.randint(1, 9), random.randint(1, 9)
+                user_data[chat_id]['captcha_answer'] = str(a + b)
+                await bot.send_message(chat_id=chat_id, text=f"❌ Неверный ответ. Попробуйте ещё раз: {a} + {b}")
+
+        # Шаг 1: Текст
+        elif state == "waiting_text":
             if len(text) > 1500:
                 extra = len(text) - 1500
                 await bot.send_message(
-                    chat_id=chat_id, 
-                    text=f"❌ Текст слишком длинный (вы ввели {len(text)} символов). Сократите его на {extra} симв. и отправьте снова."
+                    chat_id=chat_id,
+                    text=f"❌ Текст слишком длинный ({len(text)} символов). Сократите на {extra} симв. и отправьте снова."
                 )
                 return
-            
             user_data[chat_id]['ad_text'] = text
             user_data[chat_id]['photos'] = []
             user_states[chat_id] = "waiting_photos"
             await bot.send_message(
-                chat_id=chat_id, 
-                text=f"✅ Текст принят ({len(text)}/1500 символов)! Отправьте до 5 фотографий (можно альбомом). После этого напишите «Готово»."
+                chat_id=chat_id,
+                text=f"✅ Текст принят ({len(text)}/1500)! Отправьте до 5 фотографий (можно альбомом) или напишите «Готово»."
             )
 
-        # Шаг 2: фото
+        # Шаг 2: Фото
         elif state == "waiting_photos":
             if getattr(message.body, 'attachments', None):
                 added = 0
@@ -126,69 +173,131 @@ async def handle_message(message: Message):
                     if getattr(att, 'type', 'image') == 'image':
                         user_data[chat_id]['photos'].append(att.payload.url)
                         added += 1
-                
                 count = len(user_data[chat_id]['photos'])
                 if count >= 5:
                     user_states[chat_id] = "waiting_name"
-                    await bot.send_message(chat_id=chat_id, text="Принято 5 фотографий (максимум). Теперь укажите имя продавца.")
+                    await bot.send_message(chat_id=chat_id, text="Принято 5 фото (максимум). Теперь укажите имя продавца.")
                 elif added > 0:
-                    await bot.send_message(chat_id=chat_id, text=f"Фото {count}/5 принято. Отправьте ещё или напишите «Готово».")
+                    await bot.send_message(chat_id=chat_id, text=f"Фото {count}/5. Отправьте ещё или напишите «Готово».")
             elif text.lower() == "готово":
                 user_states[chat_id] = "waiting_name"
-                await bot.send_message(chat_id=chat_id, text="Фотографии приняты. Теперь укажите имя продавца.")
+                await bot.send_message(chat_id=chat_id, text="Фото приняты. Укажите имя продавца.")
             else:
-                await bot.send_message(chat_id=chat_id, text="Пожалуйста, отправьте фото или напишите «Готово».")
+                await bot.send_message(chat_id=chat_id, text="Отправьте фото или напишите «Готово».")
 
-        # Шаг 3: имя
+        # Шаг 3: Имя
         elif state == "waiting_name":
             user_data[chat_id]['name'] = text
             user_states[chat_id] = "waiting_phone"
-            await bot.send_message(chat_id=chat_id, text="Имя принято. Теперь укажите контактный телефон.")
+            await bot.send_message(chat_id=chat_id, text="Имя принято. Укажите контактный телефон.")
 
-        # Шаг 4: телефон и публикация
+        # Шаг 4: Телефон → показываем выбор канала
         elif state == "waiting_phone":
+            # Проверка лимита: теперь 6 объявлений в день
+            if not check_and_update_limit(user_id, max_ads=6):
+                await bot.send_message(
+                    chat_id=chat_id, 
+                    text="❌ Вы превысили лимит объявлений на сегодня (максимум 6). Попробуйте завтра."
+                )
+                del user_states[chat_id]
+                del user_data[chat_id]
+                return
+
             user_data[chat_id]['phone'] = text
-            
-            # Итоговый текст объявления (значки с двух сторон)
-            post_text = (
-                f"📌 Объявление 📌\n\n"
-                f"{user_data[chat_id].get('ad_text')}\n\n"
-                f"👤 Продавец: {user_data[chat_id].get('name')}\n"
-                f"📞 Телефон: {text}"
+            user_states[chat_id] = "waiting_channel"
+
+            channels = load_channels()
+            kb = InlineKeyboardBuilder()
+            for i, ch in enumerate(channels):
+                kb.callback(text=ch['name'], payload=f"publish_{i}")
+
+            await bot.send_message(
+                chat_id=chat_id,
+                text="📢 В какой канал опубликовать объявление?",
+                keyboard=kb
             )
 
-            photos = user_data[chat_id].get('photos', [])
-            attachments = []
-            if photos:
-                try:
-                    for url in photos:
-                        token = await upload_photo_to_max(url)
-                        attachments.append({"type": "image", "payload": {"token": token}})
-                except Exception as e:
-                    print(f"⚠️ Ошибка загрузки фото: {e}")
-                    await bot.send_message(chat_id=chat_id, text=f"⚠️ Не удалось загрузить некоторые фото: {e}")
-
-            try:
-                # Отправляем пост в канал
-                await bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
-                    text=post_text,
-                    attachments=attachments if attachments else None
-                )
-                await bot.send_message(chat_id=chat_id, text="✅ Спасибо! Объявление успешно опубликовано в канале.")
-            except Exception as e:
-                await bot.send_message(chat_id=chat_id, text=f"❌ Ошибка публикации: {e}")
-
-            # Очищаем состояние
-            del user_states[chat_id]
-            del user_data[chat_id]
+        # Ожидание выбора канала
+        elif state == "waiting_channel":
+            await bot.send_message(chat_id=chat_id, text="Пожалуйста, выберите канал из списка выше (нажмите кнопку).")
 
     except Exception as e:
         print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: {e} !!!")
 
+# --- Обработчик выбора канала ---
+@router.message_callback()
+async def handle_channel_choice(callback):
+    payload = getattr(callback, 'payload', None)
+    if not payload or not payload.startswith("publish_"):
+        return
+
+    try:
+        idx = int(payload.split("_")[1])
+    except (ValueError, IndexError):
+        await callback.answer(notification="Ошибка")
+        return
+
+    channels = load_channels()
+    if idx >= len(channels):
+        await callback.answer(notification="Канал не найден")
+        return
+
+    target = channels[idx]
+    chat_id = callback.message.recipient.chat_id
+    data = user_data.get(chat_id)
+
+    if not data or 'phone' not in data:
+        await callback.answer(notification="Данные утеряны. Начните заново: /start")
+        return
+
+    # Удаляем данные, чтобы повторное нажатие не дублировало публикацию
+    del user_data[chat_id]
+    del user_states[chat_id]
+
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+    # Загрузка фото
+    photos = data.get('photos', [])
+    attachments = []
+    for url in photos:
+        try:
+            token = await upload_photo_to_max(url)
+            attachments.append({"type": "image", "payload": {"token": token}})
+        except Exception as e:
+            print(f"⚠️ Ошибка загрузки фото: {e}")
+
+    post_text = (
+        f"📌 Объявление 📌\n\n"
+        f"{data.get('ad_text')}\n\n"
+        f"👤 Продавец: {data.get('name')}\n"
+        f"📞 Телефон: {data.get('phone')}"
+    )
+
+    try:
+        await bot.send_message(
+            chat_id=target['id'],
+            text=post_text,
+            attachments=attachments if attachments else None
+        )
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"✅ Объявление опубликовано в канал: **{target['name']}**"
+        )
+    except Exception as e:
+        print(f"!!! ОШИБКА ПУБЛИКАЦИИ В {target['name']}: {e} !!!")
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"❌ Не удалось опубликовать в «{target['name']}»: {e}"
+        )
+
 async def main():
     dp.include_router(router)
     print("=== БОТ УСПЕШНО ЗАПУЩЕН ===")
+    channels = load_channels()
+    print(f"📢 Доступные каналы: {[c['name'] for c in channels]}")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
