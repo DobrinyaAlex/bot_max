@@ -19,6 +19,7 @@ except ValueError:
 if not BOT_TOKEN:
     raise ValueError("Не задана переменная окружения MAX_BOT_TOKEN")
 
+# Папка для данных (на Bothost это постоянная папка /app/data)
 DATA_DIR = os.getenv("DATA_DIR", "/app/data")
 os.makedirs(DATA_DIR, exist_ok=True)
 LIMITS_FILE = os.path.join(DATA_DIR, "limits.json")
@@ -28,6 +29,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 
+# --- Хранилища данных ---
 user_states = {}
 user_data = {}
 
@@ -61,7 +63,6 @@ def save_limits(data):
         json.dump(data, f, ensure_ascii=False, indent=4)
 
 def get_user_limits(user_id: int, max_ads: int = 6) -> dict:
-    """Возвращает информацию о лимитах пользователя (использовано, осталось, максимум)"""
     limits = load_limits()
     today = datetime.date.today().isoformat()
     user_key = str(user_id)
@@ -76,7 +77,6 @@ def get_user_limits(user_id: int, max_ads: int = 6) -> dict:
     return {"used": used, "left": max_ads - used, "max": max_ads}
 
 def increment_user_limit(user_id: int):
-    """Увеличивает счетчик объявлений на 1"""
     limits = load_limits()
     today = datetime.date.today().isoformat()
     user_key = str(user_id)
@@ -127,7 +127,6 @@ async def on_start(event: BotStarted):
     chat_id = event.chat_id
     user_id = event.user.user_id
     
-    # Проверяем лимит сразу при старте
     limits = get_user_limits(user_id)
     if limits['left'] <= 0:
         await bot.send_message(
@@ -227,7 +226,6 @@ async def handle_message(message: Message):
             for i, ch in enumerate(channels):
                 kb.callback(text=ch['name'], payload=f"publish_{i}")
             
-            # Принудительно ставим кнопки в столбик (по 1 в ряд)
             if hasattr(kb, 'adjust'):
                 kb.adjust(1)
 
@@ -252,87 +250,92 @@ async def handle_channel_choice(callback):
         return
 
     try:
-        idx = int(payload.split("_")[1])
-    except (ValueError, IndexError):
-        await callback.answer(notification="Ошибка")
-        return
-
-    channels = load_channels()
-    if idx >= len(channels):
-        await callback.answer(notification="Канал не найден")
-        return
-
-    target = channels[idx]
-    chat_id = callback.message.recipient.chat_id
-    user_id = callback.sender.user_id # Получаем ID пользователя из callback
-    data = user_data.get(chat_id)
-
-    if not data or 'phone' not in data:
-        await callback.answer(notification="Данные утеряны. Начните заново: /start")
-        return
-
-    # Проверяем лимит еще раз (вдруг в двух вкладках открыли)
-    limits = get_user_limits(user_id)
-    if limits['left'] <= 0:
-        await callback.answer(notification="Лимит исчерпан", show_alert=True)
-        await bot.send_message(chat_id=chat_id, text="❌ Вы исчерпали лимит. Попробуйте завтра.")
-        del user_data[chat_id]
-        del user_states[chat_id]
-        return
-
-    # Удаляем данные, чтобы повторное нажатие не дублировало публикацию
-    del user_data[chat_id]
-    del user_states[chat_id]
-
-    try:
         await callback.answer()
     except Exception:
         pass
 
-    # Загрузка фото
-    photos = data.get('photos', [])
-    attachments = []
-    for url in photos:
-        try:
-            token = await upload_photo_to_max(url)
-            attachments.append({"type": "image", "payload": {"token": token}})
-        except Exception as e:
-            print(f"⚠️ Ошибка загрузки фото: {e}")
-
-    post_text = (
-        f"📌 Объявление 📌\n\n"
-        f"{data.get('ad_text')}\n\n"
-        f"👤 Продавец: {data.get('name')}\n"
-        f"📞 Телефон: {data.get('phone')}"
-    )
-
     try:
-        # Отправляем пост
-        await bot.send_message(
-            chat_id=target['id'],
-            text=post_text,
-            attachments=attachments if attachments else None
-        )
+        idx = int(payload.split("_")[1])
+        channels = load_channels()
+        if idx >= len(channels):
+            await bot.send_message(chat_id=callback.message.recipient.chat_id, text="❌ Канал не найден.")
+            return
+
+        target = channels[idx]
+        chat_id = callback.message.recipient.chat_id
         
-        # Списываем лимит и показываем остаток
-        increment_user_limit(user_id)
-        new_limits = get_user_limits(user_id)
-        
-        await bot.send_message(
-            chat_id=chat_id,
-            text=f"✅ Объявление опубликовано в канал: **{target['name']}**\n\n"
-                 f"Осталось объявлений на сегодня: **{new_limits['left']}** из {new_limits['max']}."
+        user_id = None
+        if hasattr(callback.message, 'sender') and hasattr(callback.message.sender, 'user_id'):
+            user_id = callback.message.sender.user_id
+        elif hasattr(callback, 'user') and hasattr(callback.user, 'user_id'):
+            user_id = callback.user.user_id
+        else:
+            user_id = chat_id
+            
+        data = user_data.get(chat_id)
+
+        if not data or 'phone' not in data:
+            await bot.send_message(chat_id=chat_id, text="❌ Данные утеряны. Начните заново: /start")
+            return
+
+        limits = get_user_limits(user_id)
+        if limits['left'] <= 0:
+            await bot.send_message(chat_id=chat_id, text="❌ Вы исчерпали лимит. Попробуйте завтра.")
+            return
+
+        del user_data[chat_id]
+        del user_states[chat_id]
+
+        photos = data.get('photos', [])
+        attachments = []
+        for url in photos:
+            try:
+                token = await upload_photo_to_max(url)
+                attachments.append({"type": "image", "payload": {"token": token}})
+            except Exception as e:
+                print(f"⚠️ Ошибка загрузки фото: {e}")
+
+        post_text = (
+            f"📌 Объявление 📌\n\n"
+            f"{data.get('ad_text')}\n\n"
+            f"👤 Продавец: {data.get('name')}\n"
+            f"📞 Телефон: {data.get('phone')}"
         )
+
+        try:
+            await bot.send_message(
+                chat_id=target['id'],
+                text=post_text,
+                attachments=attachments if attachments else None
+            )
+            
+            increment_user_limit(user_id)
+            new_limits = get_user_limits(user_id)
+            
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ Объявление опубликовано в канал: **{target['name']}**\n\n"
+                     f"Осталось объявлений на сегодня: **{new_limits['left']}** из {new_limits['max']}."
+            )
+        except Exception as e:
+            print(f"!!! ОШИБКА ПУБЛИКАЦИИ В {target['name']}: {e} !!!")
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ Не удалось опубликовать в «{target['name']}»: {e}\n"
+                     f"Попробуйте выбрать другой канал."
+            )
+            user_data[chat_id] = data
+            user_states[chat_id] = "waiting_channel"
+
     except Exception as e:
-        print(f"!!! ОШИБКА ПУБЛИКАЦИИ В {target['name']}: {e} !!!")
-        await bot.send_message(
-            chat_id=chat_id,
-            text=f"❌ Не удалось опубликовать в «{target['name']}»: {e}\n"
-                 f"Попробуйте выбрать другой канал или обратитесь к администратору."
-        )
-        # Возвращаем данные обратно в память, чтобы он мог выбрать другой канал
-        user_data[chat_id] = data
-        user_states[chat_id] = "waiting_channel"
+        print(f"!!! КРИТИЧЕСКАЯ ОШИБКА В ОБРАБОТЧИКЕ КНОПКИ: {e} !!!")
+        try:
+            await bot.send_message(
+                chat_id=callback.message.recipient.chat_id, 
+                text=f"❌ Произошла техническая ошибка при выборе канала."
+            )
+        except:
+            pass
 
 async def main():
     dp.include_router(router)
