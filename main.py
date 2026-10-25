@@ -19,7 +19,6 @@ except ValueError:
 if not BOT_TOKEN:
     raise ValueError("Не задана переменная окружения MAX_BOT_TOKEN")
 
-# Папка для данных (на Bothost это постоянная папка /app/data)
 DATA_DIR = os.getenv("DATA_DIR", "/app/data")
 os.makedirs(DATA_DIR, exist_ok=True)
 LIMITS_FILE = os.path.join(DATA_DIR, "limits.json")
@@ -29,9 +28,23 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 
-# --- Хранилища данных ---
 user_states = {}
 user_data = {}
+
+# --- Вспомогательная функция для получения ID пользователя ---
+def get_user_id(obj):
+    """Безопасно извлекает ID пользователя из любого события (Message, Callback, BotStarted)"""
+    if hasattr(obj, 'user') and hasattr(obj.user, 'user_id'):
+        return obj.user.user_id
+    if hasattr(obj, 'sender') and hasattr(obj.sender, 'user_id'):
+        return obj.sender.user_id
+    if hasattr(obj, 'message') and hasattr(obj.message, 'sender') and hasattr(obj.message.sender, 'user_id'):
+        return obj.message.sender.user_id
+    if hasattr(obj, 'from_user') and hasattr(obj.from_user, 'user_id'):
+        return obj.from_user.user_id
+    if hasattr(obj, 'message') and hasattr(obj.message, 'recipient') and hasattr(obj.message.recipient, 'user_id'):
+         return obj.message.recipient.user_id
+    return None
 
 # --- Каналы ---
 def load_channels():
@@ -86,6 +99,7 @@ def increment_user_limit(user_id: int):
     else:
         limits[user_key]["count"] += 1
     save_limits(limits)
+    print(f"=== ЛИМИТ ОБНОВЛЕН для {user_id}: {limits[user_key]['count']}/{6} ===")
 
 # --- Загрузка фото ---
 async def upload_photo_to_max(photo_url: str) -> str:
@@ -125,8 +139,10 @@ async def upload_photo_to_max(photo_url: str) -> str:
 @router.bot_started()
 async def on_start(event: BotStarted):
     chat_id = event.chat_id
-    user_id = event.user.user_id
-    
+    user_id = get_user_id(event)
+    if not user_id:
+        user_id = chat_id # Запасной вариант
+        
     limits = get_user_limits(user_id)
     if limits['left'] <= 0:
         await bot.send_message(
@@ -144,8 +160,8 @@ async def on_start(event: BotStarted):
     await bot.send_message(
         chat_id=chat_id,
         text=f"Здравствуйте! Я помогу оформить объявление.\n"
-             f"Осталось объявлений на сегодня: **{limits['left']}**.\n\n"
-             f"Для подтверждения, что вы человек, решите пример: **{a} + {b}**. Введите только цифру ответа."
+             f"Осталось объявлений на сегодня: {limits['left']}.\n\n"
+             f"Для подтверждения, что вы человек, решите пример: {a} + {b}. Введите только цифру ответа."
     )
 
 @router.message()
@@ -153,7 +169,9 @@ async def handle_message(message: Message):
     try:
         chat_id = message.recipient.chat_id
         text = getattr(message.body, 'text', '').strip()
-        user_id = message.sender.user_id
+        user_id = get_user_id(message)
+        if not user_id:
+            user_id = chat_id
 
         if chat_id not in user_states:
             await bot.send_message(chat_id=chat_id, text="Пожалуйста, нажмите 'Начать' или напишите /start.")
@@ -231,7 +249,7 @@ async def handle_message(message: Message):
 
             await bot.send_message(
                 chat_id=chat_id,
-                text=f"📢 В какой канал опубликовать объявление?\n\nУ вас осталось объявлений на сегодня: **{limits['left']}**",
+                text=f"📢 В какой канал опубликовать объявление?\n\nУ вас осталось объявлений на сегодня: {limits['left']}",
                 keyboard=kb
             )
 
@@ -264,12 +282,9 @@ async def handle_channel_choice(callback):
         target = channels[idx]
         chat_id = callback.message.recipient.chat_id
         
-        user_id = None
-        if hasattr(callback.message, 'sender') and hasattr(callback.message.sender, 'user_id'):
-            user_id = callback.message.sender.user_id
-        elif hasattr(callback, 'user') and hasattr(callback.user, 'user_id'):
-            user_id = callback.user.user_id
-        else:
+        # Строго берем user_id из нажавшего
+        user_id = get_user_id(callback)
+        if not user_id:
             user_id = chat_id
             
         data = user_data.get(chat_id)
@@ -314,8 +329,8 @@ async def handle_channel_choice(callback):
             
             await bot.send_message(
                 chat_id=chat_id,
-                text=f"✅ Объявление опубликовано в канал: **{target['name']}**\n\n"
-                     f"Осталось объявлений на сегодня: **{new_limits['left']}** из {new_limits['max']}."
+                text=f"✅ Объявление опубликовано в канал: {target['name']}\n\n"
+                     f"Осталось объявлений на сегодня: {new_limits['left']} из {new_limits['max']}."
             )
         except Exception as e:
             print(f"!!! ОШИБКА ПУБЛИКАЦИИ В {target['name']}: {e} !!!")
@@ -329,13 +344,6 @@ async def handle_channel_choice(callback):
 
     except Exception as e:
         print(f"!!! КРИТИЧЕСКАЯ ОШИБКА В ОБРАБОТЧИКЕ КНОПКИ: {e} !!!")
-        try:
-            await bot.send_message(
-                chat_id=callback.message.recipient.chat_id, 
-                text=f"❌ Произошла техническая ошибка при выборе канала."
-            )
-        except:
-            pass
 
 async def main():
     dp.include_router(router)
