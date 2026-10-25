@@ -33,7 +33,6 @@ user_data = {}
 
 # --- Вспомогательная функция для получения ID пользователя ---
 def get_user_id(obj):
-    """Безопасно извлекает ID пользователя из любого события (Message, Callback, BotStarted)"""
     if hasattr(obj, 'user') and hasattr(obj.user, 'user_id'):
         return obj.user.user_id
     if hasattr(obj, 'sender') and hasattr(obj.sender, 'user_id'):
@@ -42,8 +41,6 @@ def get_user_id(obj):
         return obj.message.sender.user_id
     if hasattr(obj, 'from_user') and hasattr(obj.from_user, 'user_id'):
         return obj.from_user.user_id
-    if hasattr(obj, 'message') and hasattr(obj.message, 'recipient') and hasattr(obj.message.recipient, 'user_id'):
-         return obj.message.recipient.user_id
     return None
 
 # --- Каналы ---
@@ -99,7 +96,6 @@ def increment_user_limit(user_id: int):
     else:
         limits[user_key]["count"] += 1
     save_limits(limits)
-    print(f"=== ЛИМИТ ОБНОВЛЕН для {user_id}: {limits[user_key]['count']}/{6} ===")
 
 # --- Загрузка фото ---
 async def upload_photo_to_max(photo_url: str) -> str:
@@ -139,9 +135,7 @@ async def upload_photo_to_max(photo_url: str) -> str:
 @router.bot_started()
 async def on_start(event: BotStarted):
     chat_id = event.chat_id
-    user_id = get_user_id(event)
-    if not user_id:
-        user_id = chat_id # Запасной вариант
+    user_id = get_user_id(event) or chat_id
         
     limits = get_user_limits(user_id)
     if limits['left'] <= 0:
@@ -169,9 +163,7 @@ async def handle_message(message: Message):
     try:
         chat_id = message.recipient.chat_id
         text = getattr(message.body, 'text', '').strip()
-        user_id = get_user_id(message)
-        if not user_id:
-            user_id = chat_id
+        user_id = get_user_id(message) or chat_id
 
         if chat_id not in user_states:
             await bot.send_message(chat_id=chat_id, text="Пожалуйста, нажмите 'Начать' или напишите /start.")
@@ -217,20 +209,20 @@ async def handle_message(message: Message):
                 count = len(user_data[chat_id]['photos'])
                 if count >= 5:
                     user_states[chat_id] = "waiting_name"
-                    await bot.send_message(chat_id=chat_id, text="Принято 5 фото (максимум). Теперь укажите имя продавца.")
+                    await bot.send_message(chat_id=chat_id, text="✅ Принято 5 фото (максимум). Теперь укажите имя продавца.")
                 elif added > 0:
-                    await bot.send_message(chat_id=chat_id, text=f"Фото {count}/5. Отправьте ещё или напишите «Готово».")
+                    await bot.send_message(chat_id=chat_id, text=f"✅ Фото {count}/5. Отправьте ещё или напишите «Готово».")
             elif text.lower() == "готово":
                 user_states[chat_id] = "waiting_name"
-                await bot.send_message(chat_id=chat_id, text="Фото приняты. Укажите имя продавца.")
+                await bot.send_message(chat_id=chat_id, text="✅ Фото приняты. Укажите имя продавца.")
             else:
-                await bot.send_message(chat_id=chat_id, text="Отправьте фото или напишите «Готово».")
+                await bot.send_message(chat_id=chat_id, text="Пожалуйста, отправьте фото или напишите «Готово».")
 
         # Шаг 3: Имя
         elif state == "waiting_name":
             user_data[chat_id]['name'] = text
             user_states[chat_id] = "waiting_phone"
-            await bot.send_message(chat_id=chat_id, text="Имя принято. Укажите контактный телефон.")
+            await bot.send_message(chat_id=chat_id, text="✅ Имя принято. Укажите контактный телефон.")
 
         # Шаг 4: Телефон → выбор канала
         elif state == "waiting_phone":
@@ -253,7 +245,6 @@ async def handle_message(message: Message):
                 keyboard=kb
             )
 
-        # Ожидание выбора канала
         elif state == "waiting_channel":
             await bot.send_message(chat_id=chat_id, text="Пожалуйста, выберите канал из списка выше (нажмите кнопку).")
 
@@ -276,17 +267,11 @@ async def handle_channel_choice(callback):
         idx = int(payload.split("_")[1])
         channels = load_channels()
         if idx >= len(channels):
-            await bot.send_message(chat_id=callback.message.recipient.chat_id, text="❌ Канал не найден.")
             return
 
         target = channels[idx]
         chat_id = callback.message.recipient.chat_id
-        
-        # Строго берем user_id из нажавшего
-        user_id = get_user_id(callback)
-        if not user_id:
-            user_id = chat_id
-            
+        user_id = get_user_id(callback) or chat_id
         data = user_data.get(chat_id)
 
         if not data or 'phone' not in data:
@@ -348,8 +333,6 @@ async def handle_channel_choice(callback):
 async def main():
     dp.include_router(router)
     print("=== БОТ УСПЕШНО ЗАПУЩЕН ===")
-    channels = load_channels()
-    print(f"📢 Доступные каналы: {[c['name'] for c in channels]}")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
