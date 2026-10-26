@@ -7,7 +7,7 @@ import time
 import traceback
 from datetime import datetime, timedelta, timezone
 
-# Перешли на стабильную maxapi
+# ИСПОЛЬЗУЕМ СТАБИЛЬНУЮ MAXAPI
 from maxapi import Bot, Dispatcher, Router
 from maxapi.types import BotStarted, Message
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
@@ -74,7 +74,6 @@ def moderation_target() -> int | None:
 
 async def safe_send(chat_id: int, text: str, keyboard=None, attachments=None) -> bool:
     try:
-        # В maxapi клавиатура передается как есть
         await bot.send_message(chat_id=chat_id, text=text, keyboard=keyboard, attachments=attachments)
         return True
     except Exception as e:
