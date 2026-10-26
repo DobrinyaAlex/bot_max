@@ -7,13 +7,11 @@ BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "")
 if not BOT_TOKEN:
     raise ValueError("Не задана переменная окружения MAX_BOT_TOKEN")
 
-
 def _int_env(name: str, default: int = 0) -> int:
     try:
         return int(os.getenv(name, str(default)))
     except ValueError:
         return default
-
 
 ADMIN_CHAT_ID = _int_env("ADMIN_CHAT_ID", 0)
 
@@ -40,14 +38,12 @@ CAPTCHA_MAX_ATTEMPTS = 3
 CAPTCHA_BAN_MIN = 10
 RATE_LIMIT_SECONDS = 2.0
 
-# Стоп-слова
 STOPWORDS = {
     "хуй", "хуя", "хуё", "хуе", "пизда", "пизды", "пизде", "блядь", "бля",
     "ебать", "ебал", "ебёт", "ебет", "ебан", "ебанат", "сука", "мразь",
     "пидор", "пидар", "гандон", "долбоеб", "долбоёб", "залупа", "мудак",
     "мудило", "шлюха", "проститутка",
 }
-
 
 def load_channels() -> list[dict]:
     raw = os.getenv("CHANNELS_JSON", "[]")
