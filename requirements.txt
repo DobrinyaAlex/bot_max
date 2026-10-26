@@ -1,4 +1,2 @@
-maxapi
-pydantic>=2.0
 aiohttp
 python-dotenv
