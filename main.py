@@ -7,10 +7,10 @@ import time
 import traceback
 from datetime import datetime, timedelta, timezone
 
-# ИСПОЛЬЗУЕМ СТАБИЛЬНУЮ MAXAPI
-from maxapi import Bot, Dispatcher, Router
-from maxapi.types import BotStarted, Message
-from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
+# РАБОЧИЕ ИМПОРТЫ MAXGRAM (версия зафиксирована в requirements.txt)
+from maxgram import Bot, Dispatcher, Router
+from maxgram.types import BotStarted, Message
+from maxgram.utils.keyboard import InlineKeyboardBuilder
 
 import config
 import db
@@ -34,6 +34,7 @@ router = Router()
 
 _last_msg_ts: dict[int, float] = {}
 
+
 # ---------- helpers ----------
 def get_user_id(obj) -> int | None:
     if hasattr(obj, "user") and hasattr(obj.user, "user_id"):
@@ -46,8 +47,10 @@ def get_user_id(obj) -> int | None:
         return obj.from_user.user_id
     return None
 
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 def rate_ok(user_id: int) -> bool:
     now = time.monotonic()
@@ -56,8 +59,11 @@ def rate_ok(user_id: int) -> bool:
     _last_msg_ts[user_id] = now
     return True
 
+
 def is_admin(user_id: int) -> bool:
+    # Проверяем наличие ID в списке администраторов
     return user_id in config.ADMIN_USER_IDS
+
 
 def moderation_target() -> int | None:
     if config.ADMIN_CHAT_ID:
@@ -72,6 +78,7 @@ def moderation_target() -> int | None:
         return config.ADMIN_USER_IDS[0]
     return None
 
+
 async def safe_send(chat_id: int, text: str, keyboard=None, attachments=None) -> bool:
     try:
         await bot.send_message(chat_id=chat_id, text=text, keyboard=keyboard, attachments=attachments)
@@ -79,6 +86,7 @@ async def safe_send(chat_id: int, text: str, keyboard=None, attachments=None) ->
     except Exception as e:
         log.error("send_message chat=%s: %s", chat_id, e)
         return False
+
 
 async def alert_admin(text: str) -> None:
     target = moderation_target()
@@ -89,6 +97,7 @@ async def alert_admin(text: str) -> None:
         await bot.send_message(chat_id=target, text=text)
     except Exception:
         log.error("alert_admin failed: %s", traceback.format_exc())
+
 
 def session_get(chat_id: int) -> tuple[str | None, dict | None]:
     s = db.get_session(chat_id)
@@ -106,8 +115,10 @@ def session_get(chat_id: int) -> tuple[str | None, dict | None]:
         return None, None
     return s["state"], json.loads(s["data"])
 
+
 def session_set(chat_id: int, user_id: int, state: str, data: dict) -> None:
     db.set_session(chat_id, int(user_id), state, json.dumps(data, ensure_ascii=False))
+
 
 def format_post(data: dict) -> str:
     return (
@@ -116,6 +127,7 @@ def format_post(data: dict) -> str:
         f"👤 Продавец: {data.get('name', '')}\n"
         f"📞 Телефон: {data.get('phone', '')}"
     )
+
 
 # ---------- start flow ----------
 @router.bot_started()
@@ -127,6 +139,7 @@ async def on_start(event: BotStarted):
     except Exception:
         log.exception("on_start error")
         await alert_admin(f"!! on_start:\n{traceback.format_exc()}")
+
 
 async def start_flow(chat_id: int, user_id: int) -> None:
     if chat_id < 0:
@@ -172,6 +185,7 @@ async def start_flow(chat_id: int, user_id: int) -> None:
         f"Для подтверждения, что вы человек, решите пример: {a} + {b}.\n"
         f"Введите только цифру ответа. Попыток: {config.CAPTCHA_MAX_ATTEMPTS}.",
     )
+
 
 # ---------- message router ----------
 @router.message()
@@ -242,6 +256,7 @@ async def handle_message(message: Message):
         log.exception("handle_message error")
         await alert_admin(f"!! handle_message:\n{traceback.format_exc()}")
 
+
 # ---------- state handlers ----------
 async def handle_captcha(chat_id, user_id, data, text):
     if not text:
@@ -276,6 +291,7 @@ async def handle_captcha(chat_id, user_id, data, text):
         f"❌ Неверно. Попытка {attempts}/{config.CAPTCHA_MAX_ATTEMPTS}. Новый пример: {a} + {b}.",
     )
 
+
 async def handle_text(chat_id, user_id, data, text):
     ok, msg, has_url = validators.validate_ad_text(text)
     if not ok:
@@ -299,6 +315,7 @@ async def handle_text(chat_id, user_id, data, text):
         f"✅ Текст принят ({len(msg)}/{config.MAX_TEXT_LEN}).{extra}\n"
         f"Отправьте до {config.MAX_PHOTOS} фото (можно альбомом) или напишите «Готово».",
     )
+
 
 async def handle_photos(chat_id, user_id, data, message, text):
     attachments = getattr(message.body, "attachments", None) or []
@@ -332,6 +349,7 @@ async def handle_photos(chat_id, user_id, data, message, text):
 
     await safe_send(chat_id, "Отправьте фото или напишите «Готово» / «Без фото».")
 
+
 async def handle_name(chat_id, user_id, data, text):
     ok, res = validators.validate_name(text)
     if not ok:
@@ -340,6 +358,7 @@ async def handle_name(chat_id, user_id, data, text):
     data["name"] = res
     session_set(chat_id, user_id, "phone", data)
     await safe_send(chat_id, "✅ Имя принято.\nУкажите контактный телефон.")
+
 
 async def handle_phone(chat_id, user_id, data, text):
     ok, res = validators.validate_phone(text)
@@ -350,12 +369,13 @@ async def handle_phone(chat_id, user_id, data, text):
     session_set(chat_id, user_id, "preview", data)
     await show_preview(chat_id, user_id, data)
 
+
 # ---------- preview / channel ----------
 async def show_preview(chat_id, user_id, data):
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Опубликовать", callback_data="confirm_publish")
-    kb.button(text="✏️ Изменить текст", callback_data="edit_text")
-    kb.button(text="❌ Отмена", callback_data="cancel_ad")
+    kb.callback(text="✅ Опубликовать", payload="confirm_publish")
+    kb.callback(text="✏️ Изменить текст", payload="edit_text")
+    kb.callback(text="❌ Отмена", payload="cancel_ad")
     if hasattr(kb, "adjust"):
         kb.adjust(1)
 
@@ -374,16 +394,17 @@ async def show_preview(chat_id, user_id, data):
     await safe_send(
         chat_id,
         f"📋 Предпросмотр:\n\n{format_post(data)}\n\nВсё верно?",
-        keyboard=kb.as_markup(),
+        keyboard=kb,
         attachments=attachments or None
     )
+
 
 async def ask_channel(chat_id, user_id, data):
     channels = config.load_channels()
     limits = db.get_daily_limits(user_id, config.DAILY_AD_LIMIT)
     kb = InlineKeyboardBuilder()
     for i, ch in enumerate(channels):
-        kb.button(text=ch["name"], callback_data=f"channel_{i}")
+        kb.callback(text=ch["name"], payload=f"channel_{i}")
     if hasattr(kb, "adjust"):
         kb.adjust(1)
     session_set(chat_id, user_id, "channel", data)
@@ -391,8 +412,9 @@ async def ask_channel(chat_id, user_id, data):
         chat_id,
         f"📢 В какой канал опубликовать?\n"
         f"Осталось объявлений: {limits['left']}/{limits['max']}",
-        keyboard=kb.as_markup(),
+        keyboard=kb,
     )
+
 
 # ---------- callbacks ----------
 @router.message_callback()
@@ -425,6 +447,7 @@ async def handle_callback(callback):
         log.exception("handle_callback error")
         await alert_admin(f"!! handle_callback:\n{traceback.format_exc()}")
 
+
 async def cb_preview(chat_id, user_id, payload):
     state, data = session_get(chat_id)
     if state != "preview" or not data:
@@ -442,6 +465,7 @@ async def cb_preview(chat_id, user_id, payload):
         return
     await ask_channel(chat_id, user_id, data)
 
+
 async def cb_channel(chat_id, user_id, payload):
     state, data = session_get(chat_id)
     if state != "channel" or not data:
@@ -458,6 +482,7 @@ async def cb_channel(chat_id, user_id, payload):
     
     db.clear_session(chat_id)
     await send_ad_to_moderation(chat_id, user_id, data, target)
+
 
 async def send_ad_to_moderation(chat_id, user_id, data, target):
     limits = db.get_daily_limits(user_id, config.DAILY_AD_LIMIT)
@@ -479,10 +504,7 @@ async def send_ad_to_moderation(chat_id, user_id, data, target):
 
     admin_chat = moderation_target()
     if not admin_chat:
-        log.error(
-            "Нет цели модерации: ADMIN_CHAT_ID=%s, ADMIN_USER_IDS=%s, admin_chat_id в БД нет",
-            config.ADMIN_CHAT_ID, config.ADMIN_USER_IDS,
-        )
+        log.error("Нет цели модерации")
         await safe_send(
             chat_id,
             "⚠️ Модерация временно недоступна. Обратитесь к администратору.",
@@ -490,11 +512,11 @@ async def send_ad_to_moderation(chat_id, user_id, data, target):
         return
 
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Одобрить", callback_data=f"approve_{ad_id}")
-    kb.button(text="🚫 Спам", callback_data=f"reject_{ad_id}_spam")
-    kb.button(text="🚫 Лексика", callback_data=f"reject_{ad_id}_content")
-    kb.button(text="🚫 Контакты", callback_data=f"reject_{ad_id}_contact")
-    kb.button(text="🚫 Другое", callback_data=f"reject_{ad_id}_other")
+    kb.callback(text="✅ Одобрить", payload=f"approve_{ad_id}")
+    kb.callback(text="🚫 Спам", payload=f"reject_{ad_id}_spam")
+    kb.callback(text="🚫 Лексика", payload=f"reject_{ad_id}_content")
+    kb.callback(text="🚫 Контакты", payload=f"reject_{ad_id}_contact")
+    kb.callback(text="🚫 Другое", payload=f"reject_{ad_id}_other")
     if hasattr(kb, "adjust"):
         kb.adjust(1)
 
@@ -519,7 +541,7 @@ async def send_ad_to_moderation(chat_id, user_id, data, target):
         await bot.send_message(
             chat_id=admin_chat, 
             text=admin_text, 
-            keyboard=kb.as_markup(), 
+            keyboard=kb, 
             attachments=attachments or None
         )
     except Exception as e:
@@ -532,6 +554,7 @@ async def send_ad_to_moderation(chat_id, user_id, data, target):
         f"📨 Объявление #{ad_id} отправлено на модерацию.\nПосле проверки придёт уведомление.",
     )
 
+
 # ---------- admin: approve / reject ----------
 REJECT_REASONS = {
     "spam": "объявление расценено как спам",
@@ -539,6 +562,7 @@ REJECT_REASONS = {
     "contact": "некорректные контактные данные",
     "other": "не соответствует правилам канала",
 }
+
 
 async def admin_approve(chat_id, user_id, ad_id):
     ad = db.get_ad(ad_id)
@@ -582,6 +606,7 @@ async def admin_approve(chat_id, user_id, ad_id):
         log.exception("publish failed ad=%s", ad_id)
         await safe_send(chat_id, f"❌ Публикация #{ad_id}: {e}")
 
+
 async def admin_reject(chat_id, user_id, ad_id, reason_code):
     ad = db.get_ad(ad_id)
     if not ad or ad["status"] != "pending":
@@ -594,6 +619,7 @@ async def admin_reject(chat_id, user_id, ad_id, reason_code):
         f"❌ Объявление #{ad_id} отклонено модератором.\nПричина: {reason}.",
     )
     await safe_send(chat_id, f"🚫 #{ad_id} отклонено ({reason_code}).")
+
 
 # ---------- /my ----------
 async def cmd_my_ads(chat_id, user_id):
@@ -610,12 +636,13 @@ async def cmd_my_ads(chat_id, user_id):
     kb = InlineKeyboardBuilder()
     for ad in ads[:5]:
         if ad["status"] == "published":
-            kb.button(text=f"🗑 Удалить #{ad['id']}", callback_data=f"myads_delete_{ad['id']}")
+            kb.callback(text=f"🗑 Удалить #{ad['id']}", payload=f"myads_delete_{ad['id']}")
         if ad["status"] in ("published", "rejected"):
-            kb.button(text=f"🔁 Повторить #{ad['id']}", callback_data=f"myads_repeat_{ad['id']}")
+            kb.callback(text=f"🔁 Повторить #{ad['id']}", payload=f"myads_repeat_{ad['id']}")
     if hasattr(kb, "adjust"):
         kb.adjust(1)
-    await safe_send(chat_id, "\n".join(lines), keyboard=kb.as_markup())
+    await safe_send(chat_id, "\n".join(lines), keyboard=kb)
+
 
 async def delete_user_ad(chat_id, user_id, ad_id):
     ad = db.get_ad(ad_id)
@@ -635,6 +662,7 @@ async def delete_user_ad(chat_id, user_id, ad_id):
     except Exception as e:
         log.exception("delete failed ad=%s", ad_id)
         await safe_send(chat_id, f"❌ Не удалось удалить: {e}")
+
 
 async def repeat_user_ad(chat_id, user_id, ad_id):
     ad = db.get_ad(ad_id)
@@ -656,6 +684,7 @@ async def repeat_user_ad(chat_id, user_id, ad_id):
     
     await safe_send(chat_id, f"⏳ Отправляю повторно на модерацию в канал «{target['name']}»...")
     await send_ad_to_moderation(chat_id, user_id, data, target)
+
 
 # ---------- /admin ----------
 async def cmd_admin(chat_id, user_id, text):
@@ -761,6 +790,7 @@ async def cmd_admin(chat_id, user_id, text):
 
     await safe_send(chat_id, "Неизвестная команда. /admin — справка.")
 
+
 # ---------- entrypoint ----------
 async def main():
     db.init_db()
@@ -773,7 +803,7 @@ async def main():
         log.warning("ADMIN_CHAT_ID не задан — заявки пойдут в личку первого админа или потеряются!")
 
     try:
-        from maxapi.types import BotCommand
+        from maxgram.types import BotCommand
         await bot.set_my_commands([
             BotCommand(command="start", description="Начать оформление"),
             BotCommand(command="my", description="Мои объявления"),
@@ -785,6 +815,7 @@ async def main():
         log.warning("Не удалось зарегистрировать меню команд (это нормально, если библиотека не поддерживает): %s", e)
 
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
