@@ -7,7 +7,7 @@ import time
 import traceback
 from datetime import datetime, timedelta, timezone
 
-# РАБОЧИЕ ИМПОРТЫ MAXGRAM (версия зафиксирована в requirements.txt)
+# РАБОЧИЕ ИМПОРТЫ MAXGRAM
 from maxgram import Bot, Dispatcher, Router
 from maxgram.types import BotStarted, Message
 from maxgram.utils.keyboard import InlineKeyboardBuilder
@@ -61,7 +61,6 @@ def rate_ok(user_id: int) -> bool:
 
 
 def is_admin(user_id: int) -> bool:
-    # Проверяем наличие ID в списке администраторов
     return user_id in config.ADMIN_USER_IDS
 
 
@@ -697,7 +696,6 @@ async def cmd_admin(chat_id, user_id, text):
             chat_id,
             "Админ-панель:\n"
             "/admin stats — статистика\n"
-            "/admin stats channels — статистика по каналам\n"
             "/admin pending — заявки\n"
             "/admin ban <uid> [минут] — блок\n"
             "/admin unban <uid> — разблок\n"
@@ -706,24 +704,6 @@ async def cmd_admin(chat_id, user_id, text):
         )
         return
     sub = parts[1].lower()
-
-    if sub == "stats" and len(parts) >= 3 and parts[2].lower() == "channels":
-        stats = db.stats_by_channel()
-        if not stats:
-            await safe_send(chat_id, "Пока нет данных по каналам.")
-            return
-        
-        lines = ["📊 Статистика по каналам:"]
-        for s in stats:
-            lines.append(
-                f"\n📁 {s['channel_name']}:\n"
-                f"  Всего: {s['total']}\n"
-                f"  ✅ Опубликовано: {s['published']}\n"
-                f"  ⏳ На модерации: {s['pending']}\n"
-                f"  🚫 Отклонено: {s['rejected']}"
-            )
-        await safe_send(chat_id, "\n".join(lines))
-        return
 
     if sub == "stats":
         s = db.stats()
@@ -812,7 +792,7 @@ async def main():
         ])
         log.info("Команды успешно зарегистрированы в меню MAX.")
     except Exception as e:
-        log.warning("Не удалось зарегистрировать меню команд (это нормально, если библиотека не поддерживает): %s", e)
+        log.warning("Не удалось зарегистрировать меню команд: %s", e)
 
     await dp.start_polling(bot)
 
