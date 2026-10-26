@@ -358,10 +358,25 @@ async def show_preview(chat_id, user_id, data):
     kb.callback(text="❌ Отмена", payload="cancel_ad")
     if hasattr(kb, "adjust"):
         kb.adjust(1)
+
+    attachments = []
+    photos = data.get("photos", [])
+    
+    if photos:
+        await safe_send(chat_id, "⏳ Загружаю фото для предпросмотра, подождите...")
+        for url in photos:
+            try:
+                # Загружаем фото и получаем токен (сохранится в кэш)
+                token = await media.upload_photo_to_max(url)
+                attachments.append({"type": "image", "payload": {"token": token}})
+            except Exception as e:
+                log.warning("Ошибка загрузки фото в предпросмотре: %s", e)
+
     await safe_send(
         chat_id,
         f"📋 Предпросмотр:\n\n{format_post(data)}\n\nВсё верно?",
         keyboard=kb,
+        attachments=attachments or None
     )
 
 async def ask_channel(chat_id, user_id, data):
