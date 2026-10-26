@@ -7,7 +7,10 @@ import time
 import traceback
 from datetime import datetime, timedelta, timezone
 
-from maxgram import Bot, Dispatcher, Router
+# Исправленные импорты для новой версии maxgram
+from maxgram import Bot
+from maxgram.dispatcher import Dispatcher
+from maxgram.router import Router
 from maxgram.types import BotStarted, Message
 from maxgram.utils.keyboard import InlineKeyboardBuilder
 
