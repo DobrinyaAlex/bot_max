@@ -1,4 +1,28 @@
-"""MAX Bot v2 — объявления с пре-модерацией через канал модерации."""
+import asyncio
+import logging
+from maxapi import Bot, Dispatcher
+import os
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("maxbot")
+
+BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "")
+
+async def main():
+    log.info("Проверка запуска...")
+    try:
+        bot = Bot(token=BOT_TOKEN)
+        dp = Dispatcher()
+        log.info("✅ Библиотека maxapi успешно импортирована и инициализирована!")
+        
+        # Просто проверим, что он может пингануть API
+        me = await bot.get_me()
+        log.info(f"Бот авторизован: {me}")
+    except Exception as e:
+        log.error(f"❌ Ошибка при инициализации: {e}")
+
+if __name__ == "__main__":
+    asyncio.run(main())"""MAX Bot v2 — объявления с пре-модерацией через канал модерации."""
 import asyncio
 import json
 import logging
