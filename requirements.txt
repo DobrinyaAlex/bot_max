@@ -1,3 +1,4 @@
-maxgram==0.1.4
+maxapi
+pydantic>=2.0
 aiohttp
 python-dotenv
