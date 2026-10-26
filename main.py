@@ -1,346 +1,723 @@
+"""MAX Bot v2 — объявления с пре-модерацией через канал модерации."""
 import asyncio
-import logging
-import os
-import aiohttp
-import random
 import json
-import datetime
-from maxgram import Bot, Dispatcher, Router, F
+import logging
+import random
+import time
+import traceback
+from datetime import datetime, timedelta, timezone
+
+from maxgram import Bot, Dispatcher, Router
 from maxgram.types import BotStarted, Message
 from maxgram.utils.keyboard import InlineKeyboardBuilder
 
-# --- Конфигурация ---
-BOT_TOKEN = os.getenv("MAX_BOT_TOKEN")
-try:
-    ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
-except ValueError:
-    ADMIN_CHAT_ID = 0
+import config
+import db
+import media
+import validators
 
-if not BOT_TOKEN:
-    raise ValueError("Не задана переменная окружения MAX_BOT_TOKEN")
+# ---------- logging ----------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    handlers=[
+        logging.FileHandler(config.LOG_PATH, encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
+log = logging.getLogger("maxbot")
 
-DATA_DIR = os.getenv("DATA_DIR", "/app/data")
-os.makedirs(DATA_DIR, exist_ok=True)
-LIMITS_FILE = os.path.join(DATA_DIR, "limits.json")
-
-logging.basicConfig(level=logging.INFO)
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 
-user_states = {}
-user_data = {}
+_last_msg_ts: dict[int, float] = {}
 
-# --- Вспомогательная функция для получения ID пользователя ---
-def get_user_id(obj):
-    if hasattr(obj, 'user') and hasattr(obj.user, 'user_id'):
+# ---------- helpers ----------
+def get_user_id(obj) -> int | None:
+    if hasattr(obj, "user") and hasattr(obj.user, "user_id"):
         return obj.user.user_id
-    if hasattr(obj, 'sender') and hasattr(obj.sender, 'user_id'):
+    if hasattr(obj, "sender") and hasattr(obj.sender, "user_id"):
         return obj.sender.user_id
-    if hasattr(obj, 'message') and hasattr(obj.message, 'sender') and hasattr(obj.message.sender, 'user_id'):
+    if hasattr(obj, "message") and hasattr(obj.message, "sender") and hasattr(obj.message.sender, "user_id"):
         return obj.message.sender.user_id
-    if hasattr(obj, 'from_user') and hasattr(obj.from_user, 'user_id'):
+    if hasattr(obj, "from_user") and hasattr(obj.from_user, "user_id"):
         return obj.from_user.user_id
     return None
 
-# --- Каналы ---
-def load_channels():
-    raw = os.getenv("CHANNELS_JSON", "[]")
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def rate_ok(user_id: int) -> bool:
+    now = time.monotonic()
+    if now - _last_msg_ts.get(user_id, 0.0) < config.RATE_LIMIT_SECONDS:
+        return False
+    _last_msg_ts[user_id] = now
+    return True
+
+def is_admin(user_id: int) -> bool:
+    """Для команд /admin в личке. Кнопки модерации в канале проверяются иначе."""
+    return bool(config.ADMIN_USER_ID) and user_id == config.ADMIN_USER_ID
+
+def moderation_target() -> int | None:
+    """Куда слать заявки на модерацию.
+    Приоритет: канал модерации ADMIN_CHAT_ID → сохранённая личка админа → ADMIN_USER_ID."""
+    if config.ADMIN_CHAT_ID:
+        return config.ADMIN_CHAT_ID
+    saved = db.get_setting("admin_chat_id")
+    if saved:
+        try:
+            return int(saved)
+        except ValueError:
+            pass
+    if config.ADMIN_USER_ID:
+        return config.ADMIN_USER_ID
+    return None
+
+async def safe_send(chat_id: int, text: str, keyboard=None, attachments=None) -> bool:
     try:
-        channels = json.loads(raw)
-        valid = []
-        for ch in channels:
-            if isinstance(ch, dict) and 'name' in ch and 'id' in ch:
-                valid.append({"name": str(ch['name']), "id": int(ch['id'])})
-        if valid:
-            return valid
+        await bot.send_message(chat_id=chat_id, text=text, keyboard=keyboard, attachments=attachments)
+        return True
     except Exception as e:
-        print(f"⚠️ Ошибка парсинга CHANNELS_JSON: {e}")
-    return [{"name": "Основной канал", "id": ADMIN_CHAT_ID}]
+        log.error("send_message chat=%s: %s", chat_id, e)
+        return False
 
-# --- Лимиты ---
-def load_limits():
-    if not os.path.exists(LIMITS_FILE):
-        return {}
-    try:
-        with open(LIMITS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def save_limits(data):
-    with open(LIMITS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-
-def get_user_limits(user_id: int, max_ads: int = 6) -> dict:
-    limits = load_limits()
-    today = datetime.date.today().isoformat()
-    user_key = str(user_id)
-    
-    if user_key not in limits:
-        limits[user_key] = {"date": today, "count": 0}
-        
-    if limits[user_key]["date"] != today:
-        limits[user_key] = {"date": today, "count": 0}
-        
-    used = limits[user_key]["count"]
-    return {"used": used, "left": max_ads - used, "max": max_ads}
-
-def increment_user_limit(user_id: int):
-    limits = load_limits()
-    today = datetime.date.today().isoformat()
-    user_key = str(user_id)
-    
-    if user_key not in limits or limits[user_key]["date"] != today:
-        limits[user_key] = {"date": today, "count": 1}
-    else:
-        limits[user_key]["count"] += 1
-    save_limits(limits)
-
-# --- Загрузка фото ---
-async def upload_photo_to_max(photo_url: str) -> str:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(photo_url, ssl=False) as resp:
-            if resp.status != 200:
-                raise Exception(f"Скачивание: HTTP {resp.status}")
-            photo_data = await resp.read()
-
-    headers = {"Authorization": BOT_TOKEN}
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            "https://platform-api2.max.ru/uploads?type=image",
-            headers=headers, ssl=False
-        ) as resp:
-            if resp.status != 200:
-                raise Exception(f"Запрос URL: HTTP {resp.status}")
-            upload_url = (await resp.json()).get("url")
-
-    async with aiohttp.ClientSession() as session:
-        form = aiohttp.FormData()
-        form.add_field('data', photo_data, filename='photo.jpg')
-        async with session.post(upload_url, data=form, ssl=False) as resp:
-            if resp.status != 200:
-                raise Exception(f"Загрузка: HTTP {resp.status}")
-            res = await resp.json()
-            token = res.get("token")
-            if not token:
-                photos = res.get("photos", {})
-                if isinstance(photos, dict) and photos:
-                    token = next(iter(photos.values())).get("token")
-            if not token:
-                raise Exception(f"Токен не найден: {res}")
-            return token
-
-# --- Обработчики ---
-@router.bot_started()
-async def on_start(event: BotStarted):
-    chat_id = event.chat_id
-    user_id = get_user_id(event) or chat_id
-        
-    limits = get_user_limits(user_id)
-    if limits['left'] <= 0:
-        await bot.send_message(
-            chat_id=chat_id, 
-            text="❌ Вы сегодня исчерпали лимит объявлений (6 из 6). Попробуйте завтра."
-        )
+async def alert_admin(text: str) -> None:
+    target = moderation_target()
+    if not target:
+        log.warning("alert_admin: нет цели, сообщение потеряно:\n%s", text)
         return
-        
-    user_states[chat_id] = "waiting_captcha"
-    user_data[chat_id] = {}
-    
-    a, b = random.randint(1, 9), random.randint(1, 9)
-    user_data[chat_id]['captcha_answer'] = str(a + b)
-    
-    await bot.send_message(
-        chat_id=chat_id,
-        text=f"Здравствуйте! Я помогу оформить объявление.\n"
-             f"Осталось объявлений на сегодня: {limits['left']}.\n\n"
-             f"Для подтверждения, что вы человек, решите пример: {a} + {b}. Введите только цифру ответа."
+    try:
+        await bot.send_message(chat_id=target, text=text)
+    except Exception:
+        log.error("alert_admin failed: %s", traceback.format_exc())
+
+def session_get(chat_id: int) -> tuple[str | None, dict | None]:
+    s = db.get_session(chat_id)
+    if not s:
+        return None, None
+    try:
+        updated = datetime.fromisoformat(s["updated_at"])
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+    except Exception:
+        db.clear_session(chat_id)
+        return None, None
+    if datetime.now(timezone.utc) - updated > timedelta(minutes=config.SESSION_TIMEOUT_MIN):
+        db.clear_session(chat_id)
+        return None, None
+    return s["state"], json.loads(s["data"])
+
+def session_set(chat_id: int, user_id: int, state: str, data: dict) -> None:
+    db.set_session(chat_id, int(user_id), state, json.dumps(data, ensure_ascii=False))
+
+def format_post(data: dict) -> str:
+    return (
+        "📌 Объявление 📌\n\n"
+        f"{data.get('ad_text', '')}\n\n"
+        f"👤 Продавец: {data.get('name', '')}\n"
+        f"📞 Телефон: {data.get('phone', '')}"
     )
 
+# ---------- start flow ----------
+@router.bot_started()
+async def on_start(event: BotStarted):
+    try:
+        chat_id = event.chat_id
+        user_id = get_user_id(event) or chat_id
+        await start_flow(chat_id, user_id)
+    except Exception:
+        log.exception("on_start error")
+        await alert_admin(f"!! on_start:\n{traceback.format_exc()}")
+
+async def start_flow(chat_id: int, user_id: int) -> None:
+    if chat_id < 0:
+        return  # в каналах не обслуживаем
+
+    db.upsert_user(user_id)
+    log.info("start_flow user_id=%s chat_id=%s", user_id, chat_id)
+
+    # fallback: запоминаем личку админа, если канал модерации не задан
+    if is_admin(user_id):
+        db.set_setting("admin_chat_id", str(chat_id))
+        log.info("admin chat_id сохранён как fallback: %s", chat_id)
+
+    banned = db.is_banned(user_id)
+    if banned:
+        await safe_send(
+            chat_id,
+            f"⛔ Вы заблокированы до {banned['banned_until']}.\n"
+            f"Причина: {banned['ban_reason'] or '—'}",
+        )
+        return
+
+    limits = db.get_daily_limits(user_id, config.DAILY_AD_LIMIT)
+    if limits["left"] <= 0:
+        await safe_send(
+            chat_id,
+            f"❌ Лимит объявлений на сегодня исчерпан ({limits['used']}/{limits['max']}). "
+            f"Попробуйте завтра.",
+        )
+        return
+
+    a, b = random.randint(1, 9), random.randint(1, 9)
+    data = {"captcha_answer": str(a + b), "captcha_attempts": 0, "photos": []}
+    session_set(chat_id, user_id, "captcha", data)
+    await safe_send(
+        chat_id,
+        f"Здравствуйте! Я помогу оформить объявление.\n"
+        f"Осталось объявлений на сегодня: {limits['left']}/{limits['max']}.\n\n"
+        f"Для подтверждения, что вы человек, решите пример: {a} + {b}.\n"
+        f"Введите только цифру ответа. Попыток: {config.CAPTCHA_MAX_ATTEMPTS}.",
+    )
+
+# ---------- message router ----------
 @router.message()
 async def handle_message(message: Message):
     try:
         chat_id = message.recipient.chat_id
-        
-        # ГЛАВНОЕ ИСПРАВЛЕНИЕ: Игнорируем сообщения из каналов и групп (отрицательный chat_id)
         if chat_id < 0:
             return
-            
-        text = getattr(message.body, 'text', '').strip()
         user_id = get_user_id(message) or chat_id
+        text = (getattr(message.body, "text", "") or "").strip()
 
-        if chat_id not in user_states:
-            await bot.send_message(chat_id=chat_id, text="Пожалуйста, нажмите 'Начать' или напишите /start.")
+        if not rate_ok(user_id):
             return
 
-        state = user_states[chat_id]
-
-        # Шаг 0: Капча
-        if state == "waiting_captcha":
-            if text == user_data[chat_id].get('captcha_answer'):
-                user_states[chat_id] = "waiting_text"
-                await bot.send_message(chat_id=chat_id, text="✅ Проверка пройдена! Введите текст вашего объявления (до 1500 символов):")
-            else:
-                a, b = random.randint(1, 9), random.randint(1, 9)
-                user_data[chat_id]['captcha_answer'] = str(a + b)
-                await bot.send_message(chat_id=chat_id, text=f"❌ Неверный ответ. Попробуйте ещё раз: {a} + {b}")
-
-        # Шаг 1: Текст
-        elif state == "waiting_text":
-            if len(text) > 1500:
-                extra = len(text) - 1500
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=f"❌ Текст слишком длинный ({len(text)} символов). Сократите на {extra} симв. и отправьте снова."
-                )
-                return
-            user_data[chat_id]['ad_text'] = text
-            user_data[chat_id]['photos'] = []
-            user_states[chat_id] = "waiting_photos"
-            await bot.send_message(
-                chat_id=chat_id,
-                text=f"✅ Текст принят ({len(text)}/1500)! Отправьте до 5 фотографий (можно альбомом) или напишите «Готово»."
+        # команды — до state-машины
+        if text.startswith("/start"):
+            await start_flow(chat_id, user_id)
+            return
+        if text == "/cancel":
+            db.clear_session(chat_id)
+            await safe_send(chat_id, "Отменено. /start — начать заново.")
+            return
+        if text == "/help":
+            await safe_send(
+                chat_id,
+                "Команды:\n"
+                "/start — начать\n"
+                "/cancel — отменить\n"
+                "/my — мои объявления\n"
+                "/help — эта справка",
             )
+            return
+        if text == "/my":
+            await cmd_my_ads(chat_id, user_id)
+            return
+        if text.startswith("/admin"):
+            await cmd_admin(chat_id, user_id, text)
+            return
 
-        # Шаг 2: Фото
-        elif state == "waiting_photos":
-            if getattr(message.body, 'attachments', None):
-                added = 0
-                for att in message.body.attachments:
-                    if getattr(att, 'type', 'image') == 'image':
-                        user_data[chat_id]['photos'].append(att.payload.url)
-                        added += 1
-                count = len(user_data[chat_id]['photos'])
-                if count >= 5:
-                    user_states[chat_id] = "waiting_name"
-                    await bot.send_message(chat_id=chat_id, text="✅ Принято 5 фото (максимум). Теперь укажите имя продавца.")
-                elif added > 0:
-                    await bot.send_message(chat_id=chat_id, text=f"✅ Фото {count}/5. Отправьте ещё или напишите «Готово».")
-            elif text.lower() == "готово":
-                user_states[chat_id] = "waiting_name"
-                await bot.send_message(chat_id=chat_id, text="✅ Фото приняты. Укажите имя продавца.")
-            else:
-                await bot.send_message(chat_id=chat_id, text="Пожалуйста, отправьте фото или напишите «Готово».")
+        banned = db.is_banned(user_id)
+        if banned:
+            await safe_send(chat_id, f"⛔ Вы заблокированы до {banned['banned_until']}.")
+            return
 
-        # Шаг 3: Имя
-        elif state == "waiting_name":
-            user_data[chat_id]['name'] = text
-            user_states[chat_id] = "waiting_phone"
-            await bot.send_message(chat_id=chat_id, text="✅ Имя принято. Укажите контактный телефон.")
+        state, data = session_get(chat_id)
+        if state is None:
+            await safe_send(chat_id, "Нажмите /start, чтобы начать.")
+            return
 
-        # Шаг 4: Телефон → выбор канала
-        elif state == "waiting_phone":
-            user_data[chat_id]['phone'] = text
-            user_states[chat_id] = "waiting_channel"
+        if state == "captcha":
+            await handle_captcha(chat_id, user_id, data, text)
+        elif state == "text":
+            await handle_text(chat_id, user_id, data, text)
+        elif state == "photos":
+            await handle_photos(chat_id, user_id, data, message, text)
+        elif state == "name":
+            await handle_name(chat_id, user_id, data, text)
+        elif state == "phone":
+            await handle_phone(chat_id, user_id, data, text)
+        elif state == "preview":
+            await safe_send(chat_id, "Нажмите кнопку под предпросмотром.")
+        elif state == "channel":
+            await safe_send(chat_id, "Выберите канал кнопкой выше.")
+        else:
+            db.clear_session(chat_id)
+            await safe_send(chat_id, "Сессия сброшена. /start")
 
-            limits = get_user_limits(user_id)
-            channels = load_channels()
-            
-            kb = InlineKeyboardBuilder()
-            for i, ch in enumerate(channels):
-                kb.callback(text=ch['name'], payload=f"publish_{i}")
-            
-            if hasattr(kb, 'adjust'):
-                kb.adjust(1)
+    except Exception:
+        log.exception("handle_message error")
+        await alert_admin(f"!! handle_message:\n{traceback.format_exc()}")
 
-            await bot.send_message(
-                chat_id=chat_id,
-                text=f"📢 В какой канал опубликовать объявление?\n\nУ вас осталось объявлений на сегодня: {limits['left']}",
-                keyboard=kb
-            )
-
-        # Ожидание выбора канала
-        elif state == "waiting_channel":
-            await bot.send_message(chat_id=chat_id, text="Пожалуйста, выберите канал из списка выше (нажмите кнопку).")
-
-    except Exception as e:
-        print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: {e} !!!")
-
-# --- Обработчик выбора канала ---
-@router.message_callback()
-async def handle_channel_choice(callback):
-    payload = getattr(callback, 'payload', None)
-    if not payload or not payload.startswith("publish_"):
+# ---------- state handlers ----------
+async def handle_captcha(chat_id, user_id, data, text):
+    if not text:
+        await safe_send(chat_id, "Введите цифру ответа.")
+        return
+    if text == data.get("captcha_answer"):
+        data["captcha_attempts"] = 0
+        session_set(chat_id, user_id, "text", data)
+        await safe_send(
+            chat_id,
+            f"✅ Проверка пройдена!\nВведите текст объявления (до {config.MAX_TEXT_LEN} символов):",
+        )
         return
 
-    try:
-        await callback.answer()
-    except Exception:
-        pass
+    attempts = data.get("captcha_attempts", 0) + 1
+    if attempts >= config.CAPTCHA_MAX_ATTEMPTS:
+        until = (datetime.now(timezone.utc) + timedelta(minutes=config.CAPTCHA_BAN_MIN)).isoformat()
+        db.ban_user(user_id, until, "3 неверных ответа капчи")
+        db.clear_session(chat_id)
+        await safe_send(
+            chat_id,
+            f"⛔ Слишком много неверных ответов. Блокировка на {config.CAPTCHA_BAN_MIN} мин.",
+        )
+        return
 
-    try:
-        idx = int(payload.split("_")[1])
-        channels = load_channels()
-        if idx >= len(channels):
-            return
+    a, b = random.randint(1, 9), random.randint(1, 9)
+    data["captcha_answer"] = str(a + b)
+    data["captcha_attempts"] = attempts
+    session_set(chat_id, user_id, "captcha", data)
+    await safe_send(
+        chat_id,
+        f"❌ Неверно. Попытка {attempts}/{config.CAPTCHA_MAX_ATTEMPTS}. Новый пример: {a} + {b}.",
+    )
 
-        target = channels[idx]
+async def handle_text(chat_id, user_id, data, text):
+    ok, msg, has_url = validators.validate_ad_text(text)
+    if not ok:
+        await safe_send(chat_id, f"❌ {msg}")
+        return
+
+    data["ad_text"] = msg
+    data["has_url"] = has_url
+
+    # если это редактирование после предпросмотра — возвращаем на предпросмотр
+    if data.get("from_edit") and data.get("name") and data.get("phone"):
+        data.pop("from_edit", None)
+        session_set(chat_id, user_id, "preview", data)
+        await show_preview(chat_id, user_id, data)
+        return
+
+    data.setdefault("photos", [])
+    session_set(chat_id, user_id, "photos", data)
+    extra = "\n⚠️ Обнаружена ссылка — объявление проверит модератор вручную." if has_url else ""
+    await safe_send(
+        chat_id,
+        f"✅ Текст принят ({len(msg)}/{config.MAX_TEXT_LEN}).{extra}\n"
+        f"Отправьте до {config.MAX_PHOTOS} фото (можно альбомом) или напишите «Готово».",
+    )
+
+async def handle_photos(chat_id, user_id, data, message, text):
+    attachments = getattr(message.body, "attachments", None) or []
+    for att in attachments:
+        if getattr(att, "type", "image") == "image":
+            url = getattr(att.payload, "url", None)
+            if url and url not in data["photos"]:
+                data["photos"].append(url)
+
+    if len(data["photos"]) >= config.MAX_PHOTOS:
+        session_set(chat_id, user_id, "name", data)
+        await safe_send(
+            chat_id,
+            f"✅ Принято {config.MAX_PHOTOS} фото (максимум).\nУкажите имя продавца:",
+        )
+        return
+
+    if text.lower() in ("готово", "без фото"):
+        session_set(chat_id, user_id, "name", data)
+        prefix = "" if data["photos"] else "Публикация без фото.\n"
+        await safe_send(chat_id, f"{prefix}Укажите имя продавца:")
+        return
+
+    if data["photos"]:
+        session_set(chat_id, user_id, "photos", data)
+        await safe_send(
+            chat_id,
+            f"✅ Фото {len(data['photos'])}/{config.MAX_PHOTOS}. Ещё или «Готово».",
+        )
+        return
+
+    await safe_send(chat_id, "Отправьте фото или напишите «Готово» / «Без фото».")
+
+async def handle_name(chat_id, user_id, data, text):
+    ok, res = validators.validate_name(text)
+    if not ok:
+        await safe_send(chat_id, f"❌ {res}")
+        return
+    data["name"] = res
+    session_set(chat_id, user_id, "phone", data)
+    await safe_send(chat_id, "✅ Имя принято.\nУкажите контактный телефон.")
+
+async def handle_phone(chat_id, user_id, data, text):
+    ok, res = validators.validate_phone(text)
+    if not ok:
+        await safe_send(chat_id, f"❌ {res}")
+        return
+    data["phone"] = res
+    session_set(chat_id, user_id, "preview", data)
+    await show_preview(chat_id, user_id, data)
+
+# ---------- preview / channel ----------
+async def show_preview(chat_id, user_id, data):
+    kb = InlineKeyboardBuilder()
+    kb.callback(text="✅ Опубликовать", payload="confirm_publish")
+    kb.callback(text="✏️ Изменить текст", payload="edit_text")
+    kb.callback(text="❌ Отмена", payload="cancel_ad")
+    if hasattr(kb, "adjust"):
+        kb.adjust(1)
+    await safe_send(
+        chat_id,
+        f"📋 Предпросмотр:\n\n{format_post(data)}\n\nВсё верно?",
+        keyboard=kb,
+    )
+
+async def ask_channel(chat_id, user_id, data):
+    channels = config.load_channels()
+    limits = db.get_daily_limits(user_id, config.DAILY_AD_LIMIT)
+    kb = InlineKeyboardBuilder()
+    for i, ch in enumerate(channels):
+        kb.callback(text=ch["name"], payload=f"channel_{i}")
+    if hasattr(kb, "adjust"):
+        kb.adjust(1)
+    session_set(chat_id, user_id, "channel", data)
+    await safe_send(
+        chat_id,
+        f"📢 В какой канал опубликовать?\n"
+        f"Осталось объявлений: {limits['left']}/{limits['max']}",
+        keyboard=kb,
+    )
+
+# ---------- callbacks ----------
+@router.message_callback()
+async def handle_callback(callback):
+    try:
+        payload = getattr(callback, "payload", None) or ""
+        try:
+            await callback.answer()
+        except Exception:
+            pass
+
         chat_id = callback.message.recipient.chat_id
         user_id = get_user_id(callback) or chat_id
-        data = user_data.get(chat_id)
 
-        if not data or 'phone' not in data:
-            await bot.send_message(chat_id=chat_id, text="❌ Данные утеряны. Начните заново: /start")
-            return
+        if payload in ("confirm_publish", "edit_text", "cancel_ad"):
+            await cb_preview(chat_id, user_id, payload)
+        elif payload.startswith("channel_"):
+            await cb_channel(chat_id, user_id, payload)
+        elif payload.startswith("approve_"):
+            await admin_approve(chat_id, user_id, int(payload.split("_")[1]))
+        elif payload.startswith("reject_"):
+            parts = payload.split("_")
+            await admin_reject(chat_id, user_id, int(parts[1]), parts[2] if len(parts) > 2 else "other")
+        elif payload.startswith("myads_delete_"):
+            await delete_user_ad(chat_id, user_id, int(payload.split("_")[2]))
+        elif payload.startswith("myads_repeat_"):
+            await repeat_user_ad(chat_id, user_id, int(payload.split("_")[2]))
 
-        limits = get_user_limits(user_id)
-        if limits['left'] <= 0:
-            await bot.send_message(chat_id=chat_id, text="❌ Вы исчерпали лимит. Попробуйте завтра.")
-            return
+    except Exception:
+        log.exception("handle_callback error")
+        await alert_admin(f"!! handle_callback:\n{traceback.format_exc()}")
 
-        del user_data[chat_id]
-        del user_states[chat_id]
+async def cb_preview(chat_id, user_id, payload):
+    state, data = session_get(chat_id)
+    if state != "preview" or not data:
+        await safe_send(chat_id, "Сессия истекла. /start")
+        return
+    if payload == "cancel_ad":
+        db.clear_session(chat_id)
+        await safe_send(chat_id, "Отменено.")
+        return
+    if payload == "edit_text":
+        data["from_edit"] = True
+        data["ad_text"] = ""
+        session_set(chat_id, user_id, "text", data)
+        await safe_send(chat_id, f"Введите новый текст (до {config.MAX_TEXT_LEN} символов):")
+        return
+    await ask_channel(chat_id, user_id, data)
 
-        photos = data.get('photos', [])
-        attachments = []
-        for url in photos:
-            try:
-                token = await upload_photo_to_max(url)
-                attachments.append({"type": "image", "payload": {"token": token}})
-            except Exception as e:
-                print(f"⚠️ Ошибка загрузки фото: {e}")
+async def cb_channel(chat_id, user_id, payload):
+    state, data = session_get(chat_id)
+    if state != "channel" or not data:
+        await safe_send(chat_id, "Сессия истекла. /start")
+        return
+    try:
+        idx = int(payload.split("_")[1])
+    except Exception:
+        return
+    channels = config.load_channels()
+    if idx >= len(channels):
+        return
+    target = channels[idx]
 
-        post_text = (
-            f"📌 Объявление 📌\n\n"
-            f"{data.get('ad_text')}\n\n"
-            f"👤 Продавец: {data.get('name')}\n"
-            f"📞 Телефон: {data.get('phone')}"
+    limits = db.get_daily_limits(user_id, config.DAILY_AD_LIMIT)
+    if limits["left"] <= 0:
+        db.clear_session(chat_id)
+        await safe_send(chat_id, "❌ Лимит исчерпан.")
+        return
+
+    ad_id = db.create_ad(
+        user_id=user_id,
+        chat_id=chat_id,
+        ad_text=data["ad_text"],
+        name=data["name"],
+        phone=data["phone"],
+        photos=data["photos"],
+        channel_id=target["id"],
+        channel_name=target["name"],
+        status="pending",
+    )
+    db.clear_session(chat_id)
+
+    admin_chat = moderation_target()
+    if not admin_chat:
+        log.error(
+            "Нет цели модерации: ADMIN_CHAT_ID=%s, ADMIN_USER_ID=%s, admin_chat_id в БД нет",
+            config.ADMIN_CHAT_ID, config.ADMIN_USER_ID,
         )
+        await safe_send(
+            chat_id,
+            "⚠️ Модерация временно недоступна. Обратитесь к администратору.",
+        )
+        return
 
-        try:
-            await bot.send_message(
-                chat_id=target['id'],
-                text=post_text,
-                attachments=attachments if attachments else None
-            )
-            
-            increment_user_limit(user_id)
-            new_limits = get_user_limits(user_id)
-            
-            await bot.send_message(
-                chat_id=chat_id,
-                text=f"✅ Объявление опубликовано в канал: {target['name']}\n\n"
-                     f"Осталось объявлений на сегодня: {new_limits['left']} из {new_limits['max']}."
-            )
-        except Exception as e:
-            print(f"!!! ОШИБКА ПУБЛИКАЦИИ В {target['name']}: {e} !!!")
-            await bot.send_message(
-                chat_id=chat_id,
-                text=f"❌ Не удалось опубликовать в «{target['name']}»: {e}\n"
-                     f"Попробуйте выбрать другой канал."
-            )
-            user_data[chat_id] = data
-            user_states[chat_id] = "waiting_channel"
+    kb = InlineKeyboardBuilder()
+    kb.callback(text="✅ Одобрить", payload=f"approve_{ad_id}")
+    kb.callback(text="🚫 Спам", payload=f"reject_{ad_id}_spam")
+    kb.callback(text="🚫 Лексика", payload=f"reject_{ad_id}_content")
+    kb.callback(text="🚫 Контакты", payload=f"reject_{ad_id}_contact")
+    kb.callback(text="🚫 Другое", payload=f"reject_{ad_id}_other")
+    if hasattr(kb, "adjust"):
+        kb.adjust(1)
 
+    admin_text = (
+        f"🆕 Заявка #{ad_id}\n"
+        f"Канал: {target['name']}\n"
+        f"Пользователь: {user_id}\n"
+        f"Ссылка в тексте: {'⚠️ да' if data.get('has_url') else 'нет'}\n\n"
+        f"{format_post(data)}"
+    )
+    try:
+        await bot.send_message(chat_id=admin_chat, text=admin_text, keyboard=kb)
     except Exception as e:
-        print(f"!!! КРИТИЧЕСКАЯ ОШИБКА В ОБРАБОТЧИКЕ КНОПКИ: {e} !!!")
+        log.error("admin send error: %s", e)
+        await safe_send(chat_id, "⚠️ Не удалось отправить на модерацию. Попробуйте позже.")
+        return
 
+    await safe_send(
+        chat_id,
+        f"📨 Объявление #{ad_id} отправлено на модерацию.\nПосле проверки придёт уведомление.",
+    )
+
+# ---------- admin: approve / reject ----------
+REJECT_REASONS = {
+    "spam": "объявление расценено как спам",
+    "content": "нецензурная лексика или запрещённый контент",
+    "contact": "некорректные контактные данные",
+    "other": "не соответствует правилам канала",
+}
+
+async def admin_approve(chat_id, user_id, ad_id):
+    # в канале модерации кнопку может жать любой админ канала — проверка по user_id не нужна
+    ad = db.get_ad(ad_id)
+    if not ad or ad["status"] != "pending":
+        await safe_send(chat_id, "❌ Заявка не найдена или уже обработана.")
+        return
+
+    photos = json.loads(ad["photos"] or "[]")
+    attachments = []
+    for url in photos:
+        try:
+            token = await media.upload_photo_to_max(url)
+            attachments.append({"type": "image", "payload": {"token": token}})
+        except Exception as e:
+            log.warning("photo upload failed ad=%s: %s", ad_id, e)
+
+    data = {"ad_text": ad["ad_text"], "name": ad["name"], "phone": ad["phone"]}
+    try:
+        res = await bot.send_message(
+            chat_id=ad["channel_id"],
+            text=format_post(data),
+            attachments=attachments or None,
+        )
+        msg_id = None
+        if isinstance(res, dict):
+            msg_id = res.get("message_id")
+        elif hasattr(res, "message_id"):
+            msg_id = res.message_id
+
+        db.update_ad_published(ad_id, msg_id, now_iso())
+        db.increment_daily_limit(ad["user_id"])
+        limits = db.get_daily_limits(ad["user_id"], config.DAILY_AD_LIMIT)
+
+        await safe_send(
+            ad["chat_id"],
+            f"✅ Объявление #{ad_id} опубликовано в «{ad['channel_name']}».\n"
+            f"Осталось на сегодня: {limits['left']}/{limits['max']}.",
+        )
+        await safe_send(chat_id, f"✅ #{ad_id} опубликовано.")
+    except Exception as e:
+        log.exception("publish failed ad=%s", ad_id)
+        await safe_send(chat_id, f"❌ Публикация #{ad_id}: {e}")
+
+async def admin_reject(chat_id, user_id, ad_id, reason_code):
+    ad = db.get_ad(ad_id)
+    if not ad or ad["status"] != "pending":
+        await safe_send(chat_id, "❌ Заявка не найдена или уже обработана.")
+        return
+    reason = REJECT_REASONS.get(reason_code, REJECT_REASONS["other"])
+    db.update_ad_rejected(ad_id, reason_code)
+    await safe_send(
+        ad["chat_id"],
+        f"❌ Объявление #{ad_id} отклонено модератором.\nПричина: {reason}.",
+    )
+    await safe_send(chat_id, f"🚫 #{ad_id} отклонено ({reason_code}).")
+
+# ---------- /my ----------
+async def cmd_my_ads(chat_id, user_id):
+    ads = db.get_user_ads(user_id, limit=10)
+    if not ads:
+        await safe_send(chat_id, "У вас пока нет объявлений.")
+        return
+    status_map = {"pending": "⏳ на модерации", "published": "✅ опубликовано",
+                  "rejected": "🚫 отклонено", "deleted": "🗑 удалено"}
+    lines = ["Ваши последние объявления:"]
+    for ad in ads:
+        lines.append(f"#{ad['id']} {status_map.get(ad['status'], ad['status'])} — {ad['channel_name'] or '—'}")
+
+    kb = InlineKeyboardBuilder()
+    for ad in ads[:5]:
+        if ad["status"] == "published":
+            kb.callback(text=f"🗑 Удалить #{ad['id']}", payload=f"myads_delete_{ad['id']}")
+        if ad["status"] in ("published", "rejected"):
+            kb.callback(text=f"🔁 Повторить #{ad['id']}", payload=f"myads_repeat_{ad['id']}")
+    if hasattr(kb, "adjust"):
+        kb.adjust(1)
+    await safe_send(chat_id, "\n".join(lines), keyboard=kb)
+
+async def delete_user_ad(chat_id, user_id, ad_id):
+    ad = db.get_ad(ad_id)
+    if not ad or ad["user_id"] != user_id:
+        await safe_send(chat_id, "Не найдено.")
+        return
+    if ad["status"] != "published":
+        await safe_send(chat_id, "Удалить можно только опубликованное.")
+        return
+    if not hasattr(bot, "delete_message"):
+        await safe_send(chat_id, "Удаление через API недоступно. Напишите админу.")
+        return
+    try:
+        await bot.delete_message(chat_id=ad["channel_id"], message_id=ad["channel_msg_id"])
+        db.update_ad_status(ad_id, "deleted")
+        await safe_send(chat_id, f"🗑 #{ad_id} удалено из канала.")
+    except Exception as e:
+        log.exception("delete failed ad=%s", ad_id)
+        await safe_send(chat_id, f"❌ Не удалось удалить: {e}")
+
+async def repeat_user_ad(chat_id, user_id, ad_id):
+    ad = db.get_ad(ad_id)
+    if not ad or ad["user_id"] != user_id:
+        return
+    banned = db.is_banned(user_id)
+    if banned:
+        await safe_send(chat_id, "⛔ Вы заблокированы.")
+        return
+    data = {
+        "ad_text": ad["ad_text"],
+        "name": ad["name"],
+        "phone": ad["phone"],
+        "photos": json.loads(ad["photos"] or "[]"),
+        "has_url": False,
+    }
+    await ask_channel(chat_id, user_id, data)
+
+# ---------- /admin ----------
+async def cmd_admin(chat_id, user_id, text):
+    if not is_admin(user_id):
+        await safe_send(chat_id, "⛔ Нет доступа.")
+        return
+    parts = text.split()
+    if len(parts) == 1:
+        await safe_send(
+            chat_id,
+            "Админ-панель:\n"
+            "/admin stats — статистика\n"
+            "/admin pending — заявки\n"
+            "/admin ban <uid> [минут] — блок\n"
+            "/admin unban <uid> — разблок\n"
+            "/admin limits <uid> — лимиты\n"
+            "/admin channels — каналы",
+        )
+        return
+    sub = parts[1].lower()
+
+    if sub == "stats":
+        s = db.stats()
+        await safe_send(
+            chat_id,
+            f"📊 Статистика:\n"
+            f"Пользователей: {s['users']}\n"
+            f"Объявлений: {s['ads_total']}\n"
+            f"  ⏳ на модерации: {s['ads_pending']}\n"
+            f"  ✅ опубликовано: {s['ads_published']}\n"
+            f"  🚫 отклонено: {s['ads_rejected']}\n"
+            f"Заблокировано: {s['banned']}",
+        )
+        return
+
+    if sub == "pending":
+        ads = db.get_pending_ads()
+        if not ads:
+            await safe_send(chat_id, "Заявок нет.")
+            return
+        lines = [f"⏳ Заявок: {len(ads)}"]
+        for a in ads[:10]:
+            lines.append(f"#{a['id']} — {a['channel_name']} (user {a['user_id']})")
+        await safe_send(chat_id, "\n".join(lines))
+        return
+
+    if sub == "ban" and len(parts) >= 3:
+        try:
+            uid = int(parts[2])
+        except ValueError:
+            await safe_send(chat_id, "uid должен быть числом.")
+            return
+        minutes = int(parts[3]) if len(parts) > 3 else 60
+        until = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+        db.ban_user(uid, until, "admin ban")
+        await safe_send(chat_id, f"⛔ Забанен {uid} до {until}.")
+        return
+
+    if sub == "unban" and len(parts) >= 3:
+        try:
+            uid = int(parts[2])
+        except ValueError:
+            await safe_send(chat_id, "uid должен быть числом.")
+            return
+        db.unban_user(uid)
+        await safe_send(chat_id, f"✅ Разбанен {uid}.")
+        return
+
+    if sub == "limits" and len(parts) >= 3:
+        try:
+            uid = int(parts[2])
+        except ValueError:
+            await safe_send(chat_id, "uid должен быть числом.")
+            return
+        lim = db.get_daily_limits(uid, config.DAILY_AD_LIMIT)
+        await safe_send(chat_id, f"Пользователь {uid}: {lim['used']}/{lim['max']} за сегодня.")
+        return
+
+    if sub == "channels":
+        chs = config.load_channels()
+        lines = ["📢 Каналы:"] + [f"• {c['name']} ({c['id']})" for c in chs]
+        await safe_send(chat_id, "\n".join(lines))
+        return
+
+    await safe_send(chat_id, "Неизвестная команда. /admin — справка.")
+
+# ---------- entrypoint ----------
 async def main():
+    db.init_db()
     dp.include_router(router)
-    print("=== БОТ УСПЕШНО ЗАПУЩЕН ===")
-    channels = load_channels()
-    print(f"📢 Доступные каналы: {[c['name'] for c in channels]}")
+    channels = config.load_channels()
+    log.info("=== БОТ ЗАПУЩЕН ===")
+    log.info("Каналы: %s", [c["name"] for c in channels])
+    log.info("ADMIN_CHAT_ID=%s ADMIN_USER_ID=%s", config.ADMIN_CHAT_ID, config.ADMIN_USER_ID)
+    if not config.ADMIN_CHAT_ID:
+        log.warning("ADMIN_CHAT_ID не задан — заявки пойдут в личку админа или потеряются!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
