@@ -15,7 +15,6 @@ def _int_env(name: str, default: int = 0) -> int:
 
 ADMIN_CHAT_ID = _int_env("ADMIN_CHAT_ID", 0)
 
-# Поддержка нескольких администраторов (ID через запятую)
 _admin_ids_str = os.getenv("ADMIN_USER_ID", "")
 ADMIN_USER_IDS = []
 for x in _admin_ids_str.split(","):
@@ -28,11 +27,10 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "bot.db"
 LOG_PATH = DATA_DIR / "bot.log"
 
-# Лимиты и таймауты
 DAILY_AD_LIMIT = _int_env("DAILY_AD_LIMIT", 6)
 MAX_PHOTOS = 5
 MAX_TEXT_LEN = 1500
-PHOTO_MAX_BYTES = 10 * 1024 * 1024  # 10 МБ
+PHOTO_MAX_BYTES = 10 * 1024 * 1024
 SESSION_TIMEOUT_MIN = 15
 CAPTCHA_MAX_ATTEMPTS = 3
 CAPTCHA_BAN_MIN = 10

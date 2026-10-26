@@ -23,7 +23,6 @@ def validate_name(text: str) -> tuple[bool, str]:
     return True, text
 
 def validate_ad_text(text: str) -> tuple[bool, str, bool]:
-    """Возвращает (ok, сообщение_или_текст, has_url)."""
     text = text.strip()
     if not text:
         return False, "Текст не может быть пустым.", False
