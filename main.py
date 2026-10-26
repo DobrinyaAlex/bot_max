@@ -454,10 +454,13 @@ async def cb_channel(chat_id, user_id, payload):
     if idx >= len(channels):
         return
     target = channels[idx]
+    
+    db.clear_session(chat_id)
+    await send_ad_to_moderation(chat_id, user_id, data, target)
 
+async def send_ad_to_moderation(chat_id, user_id, data, target):
     limits = db.get_daily_limits(user_id, config.DAILY_AD_LIMIT)
     if limits["left"] <= 0:
-        db.clear_session(chat_id)
         await safe_send(chat_id, "❌ Лимит исчерпан.")
         return
 
@@ -467,12 +470,11 @@ async def cb_channel(chat_id, user_id, payload):
         ad_text=data["ad_text"],
         name=data["name"],
         phone=data["phone"],
-        photos=data["photos"],
+        photos=data.get("photos", []),
         channel_id=target["id"],
         channel_name=target["name"],
         status="pending",
     )
-    db.clear_session(chat_id)
 
     admin_chat = moderation_target()
     if not admin_chat:
@@ -641,6 +643,8 @@ async def repeat_user_ad(chat_id, user_id, ad_id):
     if banned:
         await safe_send(chat_id, "⛔ Вы заблокированы.")
         return
+        
+    target = {"id": ad["channel_id"], "name": ad["channel_name"]}
     data = {
         "ad_text": ad["ad_text"],
         "name": ad["name"],
@@ -648,7 +652,10 @@ async def repeat_user_ad(chat_id, user_id, ad_id):
         "photos": json.loads(ad["photos"] or "[]"),
         "has_url": False,
     }
-    await ask_channel(chat_id, user_id, data)
+    
+    # Автоматически отправляем на модерацию в тот же канал
+    await safe_send(chat_id, f"⏳ Отправляю повторно на модерацию в канал «{target['name']}»...")
+    await send_ad_to_moderation(chat_id, user_id, data, target)
 
 # ---------- /admin ----------
 async def cmd_admin(chat_id, user_id, text):
@@ -746,7 +753,6 @@ async def main():
     if not config.ADMIN_CHAT_ID:
         log.warning("ADMIN_CHAT_ID не задан — заявки пойдут в личку админа или потеряются!")
 
-    # Регистрируем команды в нативном меню MAX (если библиотека поддерживает)
     try:
         from maxgram.types import BotCommand
         await bot.set_my_commands([
