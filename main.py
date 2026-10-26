@@ -56,12 +56,9 @@ def rate_ok(user_id: int) -> bool:
     return True
 
 def is_admin(user_id: int) -> bool:
-    """Для команд /admin в личке. Кнопки модерации в канале проверяются иначе."""
     return bool(config.ADMIN_USER_ID) and user_id == config.ADMIN_USER_ID
 
 def moderation_target() -> int | None:
-    """Куда слать заявки на модерацию.
-    Приоритет: канал модерации ADMIN_CHAT_ID → сохранённая личка админа → ADMIN_USER_ID."""
     if config.ADMIN_CHAT_ID:
         return config.ADMIN_CHAT_ID
     saved = db.get_setting("admin_chat_id")
@@ -132,12 +129,11 @@ async def on_start(event: BotStarted):
 
 async def start_flow(chat_id: int, user_id: int) -> None:
     if chat_id < 0:
-        return  # в каналах не обслуживаем
+        return
 
     db.upsert_user(user_id)
     log.info("start_flow user_id=%s chat_id=%s", user_id, chat_id)
 
-    # fallback: запоминаем личку админа, если канал модерации не задан
     if is_admin(user_id):
         db.set_setting("admin_chat_id", str(chat_id))
         log.info("admin chat_id сохранён как fallback: %s", chat_id)
@@ -184,7 +180,6 @@ async def handle_message(message: Message):
         if not rate_ok(user_id):
             return
 
-        # команды — до state-машины
         if text.startswith("/start"):
             await start_flow(chat_id, user_id)
             return
@@ -284,7 +279,6 @@ async def handle_text(chat_id, user_id, data, text):
     data["ad_text"] = msg
     data["has_url"] = has_url
 
-    # если это редактирование после предпросмотра — возвращаем на предпросмотр
     if data.get("from_edit") and data.get("name") and data.get("phone"):
         data.pop("from_edit", None)
         session_set(chat_id, user_id, "preview", data)
@@ -366,7 +360,6 @@ async def show_preview(chat_id, user_id, data):
         await safe_send(chat_id, "⏳ Загружаю фото для предпросмотра, подождите...")
         for url in photos:
             try:
-                # Загружаем фото и получаем токен (сохранится в кэш)
                 token = await media.upload_photo_to_max(url)
                 attachments.append({"type": "image", "payload": {"token": token}})
             except Exception as e:
@@ -504,8 +497,24 @@ async def cb_channel(chat_id, user_id, payload):
         f"Ссылка в тексте: {'⚠️ да' if data.get('has_url') else 'нет'}\n\n"
         f"{format_post(data)}"
     )
+
+    # Загружаем фото для канала модерации
+    photos = data.get("photos", [])
+    attachments = []
+    for url in photos:
+        try:
+            token = await media.upload_photo_to_max(url)
+            attachments.append({"type": "image", "payload": {"token": token}})
+        except Exception as e:
+            log.warning("Ошибка загрузки фото для модерации: %s", e)
+
     try:
-        await bot.send_message(chat_id=admin_chat, text=admin_text, keyboard=kb)
+        await bot.send_message(
+            chat_id=admin_chat, 
+            text=admin_text, 
+            keyboard=kb, 
+            attachments=attachments or None
+        )
     except Exception as e:
         log.error("admin send error: %s", e)
         await safe_send(chat_id, "⚠️ Не удалось отправить на модерацию. Попробуйте позже.")
@@ -525,7 +534,6 @@ REJECT_REASONS = {
 }
 
 async def admin_approve(chat_id, user_id, ad_id):
-    # в канале модерации кнопку может жать любой админ канала — проверка по user_id не нужна
     ad = db.get_ad(ad_id)
     if not ad or ad["status"] != "pending":
         await safe_send(chat_id, "❌ Заявка не найдена или уже обработана.")
