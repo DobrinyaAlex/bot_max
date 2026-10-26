@@ -6,8 +6,10 @@ from datetime import datetime, timezone
 
 from config import DB_PATH
 
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 @contextmanager
 def conn():
@@ -18,6 +20,7 @@ def conn():
         c.commit()
     finally:
         c.close()
+
 
 def init_db() -> None:
     with conn() as c:
@@ -80,6 +83,7 @@ def init_db() -> None:
             """
         )
 
+
 # ---------- users ----------
 def upsert_user(user_id: int, username: str | None = None) -> None:
     with conn() as c:
@@ -129,6 +133,7 @@ def unban_user(user_id: int) -> None:
             (user_id,),
         )
 
+
 # ---------- sessions ----------
 def get_session(chat_id: int) -> dict | None:
     with conn() as c:
@@ -154,6 +159,7 @@ def clear_session(chat_id: int) -> None:
     with conn() as c:
         c.execute("DELETE FROM sessions WHERE chat_id=?", (chat_id,))
 
+
 # ---------- daily limits ----------
 def _today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
@@ -176,6 +182,7 @@ def increment_daily_limit(user_id: int) -> None:
             """,
             (user_id, _today()),
         )
+
 
 # ---------- ads ----------
 def create_ad(
@@ -254,23 +261,6 @@ def stats() -> dict:
             ).fetchone()[0],
         }
 
-def stats_by_channel() -> list[dict]:
-    with conn() as c:
-        rs = c.execute(
-            """
-            SELECT 
-                channel_name,
-                COUNT(*) as total,
-                SUM(CASE WHEN status='published' THEN 1 ELSE 0 END) as published,
-                SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending,
-                SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) as rejected
-            FROM ads
-            WHERE channel_name IS NOT NULL
-            GROUP BY channel_name
-            ORDER BY total DESC
-            """
-        ).fetchall()
-        return [dict(r) for r in rs]
 
 # ---------- photo cache ----------
 def get_photo_token(url: str) -> str | None:
@@ -287,6 +277,7 @@ def save_photo_token(url: str, token: str) -> None:
             """,
             (url, token, now_iso()),
         )
+
 
 # ---------- settings ----------
 def set_setting(key: str, value: str) -> None:
