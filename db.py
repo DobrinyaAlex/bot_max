@@ -1,4 +1,4 @@
-"""Слой работы с SQLite. Все операции короткие, соединение на вызов."""
+"""Слой работы с SQLite."""
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -81,7 +81,6 @@ def init_db() -> None:
         )
 
 # ---------- users ----------
-
 def upsert_user(user_id: int, username: str | None = None) -> None:
     with conn() as c:
         c.execute(
@@ -91,11 +90,6 @@ def upsert_user(user_id: int, username: str | None = None) -> None:
             """,
             (user_id, username, now_iso()),
         )
-
-def get_user(user_id: int) -> dict | None:
-    with conn() as c:
-        r = c.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
-        return dict(r) if r else None
 
 def is_banned(user_id: int) -> dict | None:
     with conn() as c:
@@ -136,7 +130,6 @@ def unban_user(user_id: int) -> None:
         )
 
 # ---------- sessions ----------
-
 def get_session(chat_id: int) -> dict | None:
     with conn() as c:
         r = c.execute("SELECT * FROM sessions WHERE chat_id=?", (chat_id,)).fetchone()
@@ -162,7 +155,6 @@ def clear_session(chat_id: int) -> None:
         c.execute("DELETE FROM sessions WHERE chat_id=?", (chat_id,))
 
 # ---------- daily limits ----------
-
 def _today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
@@ -186,7 +178,6 @@ def increment_daily_limit(user_id: int) -> None:
         )
 
 # ---------- ads ----------
-
 def create_ad(
     user_id: int,
     chat_id: int,
@@ -207,16 +198,9 @@ def create_ad(
             ) VALUES (?,?,?,?,?,?,?,?,?,?)
             """,
             (
-                user_id,
-                chat_id,
-                ad_text,
-                name,
-                phone,
+                user_id, chat_id, ad_text, name, phone,
                 json.dumps(photos, ensure_ascii=False),
-                channel_id,
-                channel_name,
-                status,
-                now_iso(),
+                channel_id, channel_name, status, now_iso(),
             ),
         )
         return int(cur.lastrowid)
@@ -270,8 +254,25 @@ def stats() -> dict:
             ).fetchone()[0],
         }
 
-# ---------- photo cache ----------
+def stats_by_channel() -> list[dict]:
+    with conn() as c:
+        rs = c.execute(
+            """
+            SELECT 
+                channel_name,
+                COUNT(*) as total,
+                SUM(CASE WHEN status='published' THEN 1 ELSE 0 END) as published,
+                SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending,
+                SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) as rejected
+            FROM ads
+            WHERE channel_name IS NOT NULL
+            GROUP BY channel_name
+            ORDER BY total DESC
+            """
+        ).fetchall()
+        return [dict(r) for r in rs]
 
+# ---------- photo cache ----------
 def get_photo_token(url: str) -> str | None:
     with conn() as c:
         r = c.execute("SELECT token FROM photo_cache WHERE url=?", (url,)).fetchone()
@@ -288,7 +289,6 @@ def save_photo_token(url: str, token: str) -> None:
         )
 
 # ---------- settings ----------
-
 def set_setting(key: str, value: str) -> None:
     with conn() as c:
         c.execute(

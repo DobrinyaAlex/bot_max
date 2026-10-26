@@ -1,7 +1,6 @@
 """Загрузка фото в MAX: кэш токена по URL, 3 ретрая, лимит размера."""
 import asyncio
 import logging
-
 import aiohttp
 
 import db
