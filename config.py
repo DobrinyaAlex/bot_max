@@ -16,7 +16,14 @@ def _int_env(name: str, default: int = 0) -> int:
 
 
 ADMIN_CHAT_ID = _int_env("ADMIN_CHAT_ID", 0)
-ADMIN_USER_ID = _int_env("ADMIN_USER_ID", 0)
+
+# Поддержка нескольких администраторов (ID через запятую)
+_admin_ids_str = os.getenv("ADMIN_USER_ID", "")
+ADMIN_USER_IDS = []
+for x in _admin_ids_str.split(","):
+    x = x.strip()
+    if x.isdigit():
+        ADMIN_USER_IDS.append(int(x))
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
