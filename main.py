@@ -159,10 +159,15 @@ async def start_flow(chat_id: int, user_id: int) -> None:
     a, b = random.randint(1, 9), random.randint(1, 9)
     data = {"captcha_answer": str(a + b), "captcha_attempts": 0, "photos": []}
     session_set(chat_id, user_id, "captcha", data)
+    
     await safe_send(
         chat_id,
         f"Здравствуйте! Я помогу оформить объявление.\n"
         f"Осталось объявлений на сегодня: {limits['left']}/{limits['max']}.\n\n"
+        f"💡 Доступные команды:\n"
+        f"/my — ваши объявления\n"
+        f"/cancel — отменить действие\n"
+        f"/help — справка\n\n"
         f"Для подтверждения, что вы человек, решите пример: {a} + {b}.\n"
         f"Введите только цифру ответа. Попыток: {config.CAPTCHA_MAX_ATTEMPTS}.",
     )
@@ -190,10 +195,10 @@ async def handle_message(message: Message):
         if text == "/help":
             await safe_send(
                 chat_id,
-                "Команды:\n"
-                "/start — начать\n"
-                "/cancel — отменить\n"
-                "/my — мои объявления\n"
+                "Доступные команды:\n"
+                "/start — начать оформление объявления\n"
+                "/my — мои объявления (удалить, повторить)\n"
+                "/cancel — отменить текущее действие\n"
                 "/help — эта справка",
             )
             return
@@ -211,7 +216,7 @@ async def handle_message(message: Message):
 
         state, data = session_get(chat_id)
         if state is None:
-            await safe_send(chat_id, "Нажмите /start, чтобы начать.")
+            await safe_send(chat_id, "Нажмите /start, чтобы начать. Или воспользуйтесь /help для списка команд.")
             return
 
         if state == "captcha":
@@ -498,7 +503,6 @@ async def cb_channel(chat_id, user_id, payload):
         f"{format_post(data)}"
     )
 
-    # Загружаем фото для канала модерации
     photos = data.get("photos", [])
     attachments = []
     for url in photos:
@@ -741,6 +745,20 @@ async def main():
     log.info("ADMIN_CHAT_ID=%s ADMIN_USER_ID=%s", config.ADMIN_CHAT_ID, config.ADMIN_USER_ID)
     if not config.ADMIN_CHAT_ID:
         log.warning("ADMIN_CHAT_ID не задан — заявки пойдут в личку админа или потеряются!")
+
+    # Регистрируем команды в нативном меню MAX (если библиотека поддерживает)
+    try:
+        from maxgram.types import BotCommand
+        await bot.set_my_commands([
+            BotCommand(command="start", description="Начать оформление"),
+            BotCommand(command="my", description="Мои объявления"),
+            BotCommand(command="cancel", description="Отменить действие"),
+            BotCommand(command="help", description="Справка"),
+        ])
+        log.info("Команды успешно зарегистрированы в меню MAX.")
+    except Exception as e:
+        log.warning("Не удалось зарегистрировать меню команд (это нормально, если библиотека не поддерживает): %s", e)
+
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
