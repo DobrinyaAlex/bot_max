@@ -7,10 +7,10 @@ import time
 import traceback
 from datetime import datetime, timedelta, timezone
 
-# ВОЗВРАЩАЕМ ИМПОРТЫ MAXGRAM (с фиксированной версией в requirements.txt)
-from maxgram import Bot, Dispatcher, Router
-from maxgram.types import BotStarted, Message
-from maxgram.utils.keyboard import InlineKeyboardBuilder
+# Перешли на стабильную maxapi
+from maxapi import Bot, Dispatcher, Router
+from maxapi.types import BotStarted, Message
+from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 import config
 import db
@@ -74,6 +74,7 @@ def moderation_target() -> int | None:
 
 async def safe_send(chat_id: int, text: str, keyboard=None, attachments=None) -> bool:
     try:
+        # В maxapi клавиатура передается как есть
         await bot.send_message(chat_id=chat_id, text=text, keyboard=keyboard, attachments=attachments)
         return True
     except Exception as e:
@@ -353,9 +354,9 @@ async def handle_phone(chat_id, user_id, data, text):
 # ---------- preview / channel ----------
 async def show_preview(chat_id, user_id, data):
     kb = InlineKeyboardBuilder()
-    kb.callback(text="✅ Опубликовать", payload="confirm_publish")
-    kb.callback(text="✏️ Изменить текст", payload="edit_text")
-    kb.callback(text="❌ Отмена", payload="cancel_ad")
+    kb.button(text="✅ Опубликовать", callback_data="confirm_publish")
+    kb.button(text="✏️ Изменить текст", callback_data="edit_text")
+    kb.button(text="❌ Отмена", callback_data="cancel_ad")
     if hasattr(kb, "adjust"):
         kb.adjust(1)
 
@@ -374,7 +375,7 @@ async def show_preview(chat_id, user_id, data):
     await safe_send(
         chat_id,
         f"📋 Предпросмотр:\n\n{format_post(data)}\n\nВсё верно?",
-        keyboard=kb,
+        keyboard=kb.as_markup(),
         attachments=attachments or None
     )
 
@@ -383,7 +384,7 @@ async def ask_channel(chat_id, user_id, data):
     limits = db.get_daily_limits(user_id, config.DAILY_AD_LIMIT)
     kb = InlineKeyboardBuilder()
     for i, ch in enumerate(channels):
-        kb.callback(text=ch["name"], payload=f"channel_{i}")
+        kb.button(text=ch["name"], callback_data=f"channel_{i}")
     if hasattr(kb, "adjust"):
         kb.adjust(1)
     session_set(chat_id, user_id, "channel", data)
@@ -391,7 +392,7 @@ async def ask_channel(chat_id, user_id, data):
         chat_id,
         f"📢 В какой канал опубликовать?\n"
         f"Осталось объявлений: {limits['left']}/{limits['max']}",
-        keyboard=kb,
+        keyboard=kb.as_markup(),
     )
 
 # ---------- callbacks ----------
@@ -490,11 +491,11 @@ async def send_ad_to_moderation(chat_id, user_id, data, target):
         return
 
     kb = InlineKeyboardBuilder()
-    kb.callback(text="✅ Одобрить", payload=f"approve_{ad_id}")
-    kb.callback(text="🚫 Спам", payload=f"reject_{ad_id}_spam")
-    kb.callback(text="🚫 Лексика", payload=f"reject_{ad_id}_content")
-    kb.callback(text="🚫 Контакты", payload=f"reject_{ad_id}_contact")
-    kb.callback(text="🚫 Другое", payload=f"reject_{ad_id}_other")
+    kb.button(text="✅ Одобрить", callback_data=f"approve_{ad_id}")
+    kb.button(text="🚫 Спам", callback_data=f"reject_{ad_id}_spam")
+    kb.button(text="🚫 Лексика", callback_data=f"reject_{ad_id}_content")
+    kb.button(text="🚫 Контакты", callback_data=f"reject_{ad_id}_contact")
+    kb.button(text="🚫 Другое", callback_data=f"reject_{ad_id}_other")
     if hasattr(kb, "adjust"):
         kb.adjust(1)
 
@@ -519,7 +520,7 @@ async def send_ad_to_moderation(chat_id, user_id, data, target):
         await bot.send_message(
             chat_id=admin_chat, 
             text=admin_text, 
-            keyboard=kb, 
+            keyboard=kb.as_markup(), 
             attachments=attachments or None
         )
     except Exception as e:
@@ -610,12 +611,12 @@ async def cmd_my_ads(chat_id, user_id):
     kb = InlineKeyboardBuilder()
     for ad in ads[:5]:
         if ad["status"] == "published":
-            kb.callback(text=f"🗑 Удалить #{ad['id']}", payload=f"myads_delete_{ad['id']}")
+            kb.button(text=f"🗑 Удалить #{ad['id']}", callback_data=f"myads_delete_{ad['id']}")
         if ad["status"] in ("published", "rejected"):
-            kb.callback(text=f"🔁 Повторить #{ad['id']}", payload=f"myads_repeat_{ad['id']}")
+            kb.button(text=f"🔁 Повторить #{ad['id']}", callback_data=f"myads_repeat_{ad['id']}")
     if hasattr(kb, "adjust"):
         kb.adjust(1)
-    await safe_send(chat_id, "\n".join(lines), keyboard=kb)
+    await safe_send(chat_id, "\n".join(lines), keyboard=kb.as_markup())
 
 async def delete_user_ad(chat_id, user_id, ad_id):
     ad = db.get_ad(ad_id)
@@ -773,7 +774,7 @@ async def main():
         log.warning("ADMIN_CHAT_ID не задан — заявки пойдут в личку первого админа или потеряются!")
 
     try:
-        from maxgram.types import BotCommand
+        from maxapi.types import BotCommand
         await bot.set_my_commands([
             BotCommand(command="start", description="Начать оформление"),
             BotCommand(command="my", description="Мои объявления"),
