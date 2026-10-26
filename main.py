@@ -34,7 +34,6 @@ class MAXBot:
         payload = {"text": text}
         final_attachments = attachments or []
         
-        # ИСПРАВЛЕНИЕ: Добавляем клавиатуру как вложение, если она есть
         if keyboard:
             final_attachments.append(keyboard)
             
@@ -123,7 +122,6 @@ def session_set(chat_id: int, user_id: int, state: str, data: dict) -> None:
 def format_post(data: dict) -> str:
     return f"📌 Объявление 📌\n\n{data.get('ad_text', '')}\n\n👤 Продавец: {data.get('name', '')}\n📞 Телефон: {data.get('phone', '')}"
 
-# ИСПРАВЛЕНИЕ: Возвращаем правильный формат inline_keyboard для вложений MAX API
 def make_keyboard(buttons: list[tuple[str, str]]):
     return {
         "type": "inline_keyboard",
@@ -379,19 +377,56 @@ async def cmd_admin(chat_id, user_id, text):
     if not is_admin(user_id): return
     parts = text.split()
     if len(parts) == 1:
-        await safe_send(chat_id, "Админ-панель:\n/admin stats\n/admin stats channels\n/admin pending\n/admin ban <uid>\n/admin unban <uid>"); return
+        await safe_send(chat_id, "Админ-панель:\n/admin stats — общая статистика\n/admin stats channels — статистика по каналам\n/admin pending — заявки\n/admin ban <uid> [минут] — блок\n/admin unban <uid> — разблок"); return
     sub = parts[1].lower()
 
+    # --- НОВАЯ СТАТИСТИКА ПО КАНАЛАМ ---
     if sub == "stats" and len(parts) >= 3 and parts[2].lower() == "channels":
-        stats = db.stats_by_channel()
-        if not stats: await safe_send(chat_id, "Нет данных."); return
+        stats_db = {s['channel_name']: s for s in db.stats_by_channel()}
+        channels = config.load_channels()
+        
         lines = ["📊 Статистика по каналам:"]
-        for s in stats: lines.append(f"\n📁 {s['channel_name']}:\n  Всего: {s['total']}\n  ✅ Опубликовано: {s['published']}\n  ⏳ На модерации: {s['pending']}\n  🚫 Отклонено: {s['rejected']}")
-        await safe_send(chat_id, "\n".join(lines)); return
+        for ch in channels:
+            s = stats_db.get(ch['name'], {"total": 0, "published": 0, "pending": 0, "rejected": 0})
+            lines.append(
+                f"\n📁 {ch['name']}:\n"
+                f"  Всего: {s['total']}\n"
+                f"  ✅ Опубликовано: {s['published']}\n"
+                f"  ⏳ На модерации: {s['pending']}\n"
+                f"  🚫 Отклонено: {s['rejected']}"
+            )
+        
+        # Добавляем каналы, которые есть в БД, но удалены из конфига (опционально)
+        for db_name, s in stats_db.items():
+            if not any(ch['name'] == db_name for ch in channels):
+                lines.append(
+                    f"\n📁 {db_name} (удален из конфига):\n"
+                    f"  Всего: {s['total']}\n"
+                    f"  ✅ Опубликовано: {s['published']}\n"
+                    f"  ⏳ На модерации: {s['pending']}\n"
+                    f"  🚫 Отклонено: {s['rejected']}"
+                )
+        await safe_send(chat_id, "\n".join(lines))
+        return
 
+    # --- ОБЩАЯ СТАТИСТИКА ---
     if sub == "stats":
         s = db.stats()
-        await safe_send(chat_id, f"📊 Пользователей: {s['users']}\nОбъявлений: {s['ads_total']}\nОпубликовано: {s['ads_published']}"); return
+        lines = [
+            f"📊 Общая статистика:",
+            f"Пользователей: {s['users']}",
+            f"Объявлений: {s['ads_total']}",
+            f"  ⏳ на модерации: {s['ads_pending']}",
+            f"  ✅ опубликовано: {s['ads_published']}",
+            f"  🚫 отклонено: {s['ads_rejected']}",
+            f"Заблокировано: {s['banned']}",
+            "",
+            "📢 Настроенные каналы:"
+        ]
+        for ch in config.load_channels():
+            lines.append(f"• {ch['name']} (ID: {ch['id']})")
+        await safe_send(chat_id, "\n".join(lines)); return
+
     if sub == "pending":
         ads = db.get_pending_ads()
         await safe_send(chat_id, f"⏳ Заявок: {len(ads)}" if ads else "Заявок нет."); return
