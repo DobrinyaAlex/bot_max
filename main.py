@@ -7,10 +7,10 @@ import time
 import traceback
 from datetime import datetime, timedelta, timezone
 
-# Перешли на надежную библиотеку maxapi
-from maxapi import Bot, Dispatcher, Router
-from maxapi.types import BotStarted, Message
-from maxapi.utils.keyboard import InlineKeyboardBuilder
+# ВОЗВРАЩАЕМ ИМПОРТЫ MAXGRAM (с фиксированной версией в requirements.txt)
+from maxgram import Bot, Dispatcher, Router
+from maxgram.types import BotStarted, Message
+from maxgram.utils.keyboard import InlineKeyboardBuilder
 
 import config
 import db
@@ -773,7 +773,7 @@ async def main():
         log.warning("ADMIN_CHAT_ID не задан — заявки пойдут в личку первого админа или потеряются!")
 
     try:
-        from maxapi.types import BotCommand
+        from maxgram.types import BotCommand
         await bot.set_my_commands([
             BotCommand(command="start", description="Начать оформление"),
             BotCommand(command="my", description="Мои объявления"),
