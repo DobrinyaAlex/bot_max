@@ -13,10 +13,11 @@ def _int_env(name: str, default: int = 0) -> int:
     except ValueError:
         return default
 
-# ADMIN_CHAT_ID — канал/группа модерации (приоритет)
-# ADMIN_USER_ID — личный user_id (для /admin и как fallback)
 ADMIN_CHAT_ID = _int_env("ADMIN_CHAT_ID", 0)
-ADMIN_USER_ID = _int_env("ADMIN_USER_ID", 0)
+
+# Поддержка списка администраторов (через запятую в переменной окружения)
+_admin_ids_str = os.getenv("ADMIN_USER_ID", "")
+ADMIN_USER_IDS = [int(x.strip()) for x in _admin_ids_str.split(",") if x.strip().isdigit()]
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -33,7 +34,7 @@ CAPTCHA_MAX_ATTEMPTS = 3
 CAPTCHA_BAN_MIN = 10
 RATE_LIMIT_SECONDS = 2.0
 
-# Стоп-слова: минимальный список, расширяйте по потребностям
+# Стоп-слова
 STOPWORDS = {
     "хуй", "хуя", "хуё", "хуе", "пизда", "пизды", "пизде", "блядь", "бля",
     "ебать", "ебал", "ебёт", "ебет", "ебан", "ебанат", "сука", "мразь",
@@ -53,4 +54,4 @@ def load_channels() -> list[dict]:
             return valid
     except Exception as e:
         print(f"⚠️ Ошибка парсинга CHANNELS_JSON: {e}")
-    return [{"name": "Основной канал", "id": ADMIN_CHAT_ID}]
+    return [{"name":
