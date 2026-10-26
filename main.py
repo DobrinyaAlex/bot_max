@@ -33,6 +33,7 @@ router = Router()
 
 _last_msg_ts: dict[int, float] = {}
 
+
 # ---------- helpers ----------
 def get_user_id(obj) -> int | None:
     if hasattr(obj, "user") and hasattr(obj.user, "user_id"):
@@ -45,8 +46,10 @@ def get_user_id(obj) -> int | None:
         return obj.from_user.user_id
     return None
 
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 def rate_ok(user_id: int) -> bool:
     now = time.monotonic()
@@ -55,8 +58,11 @@ def rate_ok(user_id: int) -> bool:
     _last_msg_ts[user_id] = now
     return True
 
+
 def is_admin(user_id: int) -> bool:
-    return bool(config.ADMIN_USER_ID) and user_id == config.ADMIN_USER_ID
+    # Теперь проверяет, есть ли ID в списке администраторов
+    return user_id in config.ADMIN_USER_IDS
+
 
 def moderation_target() -> int | None:
     if config.ADMIN_CHAT_ID:
@@ -67,9 +73,11 @@ def moderation_target() -> int | None:
             return int(saved)
         except ValueError:
             pass
-    if config.ADMIN_USER_ID:
-        return config.ADMIN_USER_ID
+    # Если канал не задан, шлем первому админу из списка
+    if config.ADMIN_USER_IDS:
+        return config.ADMIN_USER_IDS[0]
     return None
+
 
 async def safe_send(chat_id: int, text: str, keyboard=None, attachments=None) -> bool:
     try:
@@ -78,6 +86,7 @@ async def safe_send(chat_id: int, text: str, keyboard=None, attachments=None) ->
     except Exception as e:
         log.error("send_message chat=%s: %s", chat_id, e)
         return False
+
 
 async def alert_admin(text: str) -> None:
     target = moderation_target()
@@ -88,6 +97,7 @@ async def alert_admin(text: str) -> None:
         await bot.send_message(chat_id=target, text=text)
     except Exception:
         log.error("alert_admin failed: %s", traceback.format_exc())
+
 
 def session_get(chat_id: int) -> tuple[str | None, dict | None]:
     s = db.get_session(chat_id)
@@ -105,8 +115,10 @@ def session_get(chat_id: int) -> tuple[str | None, dict | None]:
         return None, None
     return s["state"], json.loads(s["data"])
 
+
 def session_set(chat_id: int, user_id: int, state: str, data: dict) -> None:
     db.set_session(chat_id, int(user_id), state, json.dumps(data, ensure_ascii=False))
+
 
 def format_post(data: dict) -> str:
     return (
@@ -115,6 +127,7 @@ def format_post(data: dict) -> str:
         f"👤 Продавец: {data.get('name', '')}\n"
         f"📞 Телефон: {data.get('phone', '')}"
     )
+
 
 # ---------- start flow ----------
 @router.bot_started()
@@ -127,6 +140,7 @@ async def on_start(event: BotStarted):
         log.exception("on_start error")
         await alert_admin(f"!! on_start:\n{traceback.format_exc()}")
 
+
 async def start_flow(chat_id: int, user_id: int) -> None:
     if chat_id < 0:
         return
@@ -134,6 +148,7 @@ async def start_flow(chat_id: int, user_id: int) -> None:
     db.upsert_user(user_id)
     log.info("start_flow user_id=%s chat_id=%s", user_id, chat_id)
 
+    # Если это один из админов, сохраняем его chat_id как fallback
     if is_admin(user_id):
         db.set_setting("admin_chat_id", str(chat_id))
         log.info("admin chat_id сохранён как fallback: %s", chat_id)
@@ -171,6 +186,7 @@ async def start_flow(chat_id: int, user_id: int) -> None:
         f"Для подтверждения, что вы человек, решите пример: {a} + {b}.\n"
         f"Введите только цифру ответа. Попыток: {config.CAPTCHA_MAX_ATTEMPTS}.",
     )
+
 
 # ---------- message router ----------
 @router.message()
@@ -241,6 +257,7 @@ async def handle_message(message: Message):
         log.exception("handle_message error")
         await alert_admin(f"!! handle_message:\n{traceback.format_exc()}")
 
+
 # ---------- state handlers ----------
 async def handle_captcha(chat_id, user_id, data, text):
     if not text:
@@ -275,6 +292,7 @@ async def handle_captcha(chat_id, user_id, data, text):
         f"❌ Неверно. Попытка {attempts}/{config.CAPTCHA_MAX_ATTEMPTS}. Новый пример: {a} + {b}.",
     )
 
+
 async def handle_text(chat_id, user_id, data, text):
     ok, msg, has_url = validators.validate_ad_text(text)
     if not ok:
@@ -298,6 +316,7 @@ async def handle_text(chat_id, user_id, data, text):
         f"✅ Текст принят ({len(msg)}/{config.MAX_TEXT_LEN}).{extra}\n"
         f"Отправьте до {config.MAX_PHOTOS} фото (можно альбомом) или напишите «Готово».",
     )
+
 
 async def handle_photos(chat_id, user_id, data, message, text):
     attachments = getattr(message.body, "attachments", None) or []
@@ -331,6 +350,7 @@ async def handle_photos(chat_id, user_id, data, message, text):
 
     await safe_send(chat_id, "Отправьте фото или напишите «Готово» / «Без фото».")
 
+
 async def handle_name(chat_id, user_id, data, text):
     ok, res = validators.validate_name(text)
     if not ok:
@@ -340,6 +360,7 @@ async def handle_name(chat_id, user_id, data, text):
     session_set(chat_id, user_id, "phone", data)
     await safe_send(chat_id, "✅ Имя принято.\nУкажите контактный телефон.")
 
+
 async def handle_phone(chat_id, user_id, data, text):
     ok, res = validators.validate_phone(text)
     if not ok:
@@ -348,6 +369,7 @@ async def handle_phone(chat_id, user_id, data, text):
     data["phone"] = res
     session_set(chat_id, user_id, "preview", data)
     await show_preview(chat_id, user_id, data)
+
 
 # ---------- preview / channel ----------
 async def show_preview(chat_id, user_id, data):
@@ -377,6 +399,7 @@ async def show_preview(chat_id, user_id, data):
         attachments=attachments or None
     )
 
+
 async def ask_channel(chat_id, user_id, data):
     channels = config.load_channels()
     limits = db.get_daily_limits(user_id, config.DAILY_AD_LIMIT)
@@ -392,6 +415,7 @@ async def ask_channel(chat_id, user_id, data):
         f"Осталось объявлений: {limits['left']}/{limits['max']}",
         keyboard=kb,
     )
+
 
 # ---------- callbacks ----------
 @router.message_callback()
@@ -424,6 +448,7 @@ async def handle_callback(callback):
         log.exception("handle_callback error")
         await alert_admin(f"!! handle_callback:\n{traceback.format_exc()}")
 
+
 async def cb_preview(chat_id, user_id, payload):
     state, data = session_get(chat_id)
     if state != "preview" or not data:
@@ -441,6 +466,7 @@ async def cb_preview(chat_id, user_id, payload):
         return
     await ask_channel(chat_id, user_id, data)
 
+
 async def cb_channel(chat_id, user_id, payload):
     state, data = session_get(chat_id)
     if state != "channel" or not data:
@@ -457,6 +483,7 @@ async def cb_channel(chat_id, user_id, payload):
     
     db.clear_session(chat_id)
     await send_ad_to_moderation(chat_id, user_id, data, target)
+
 
 async def send_ad_to_moderation(chat_id, user_id, data, target):
     limits = db.get_daily_limits(user_id, config.DAILY_AD_LIMIT)
@@ -479,8 +506,8 @@ async def send_ad_to_moderation(chat_id, user_id, data, target):
     admin_chat = moderation_target()
     if not admin_chat:
         log.error(
-            "Нет цели модерации: ADMIN_CHAT_ID=%s, ADMIN_USER_ID=%s, admin_chat_id в БД нет",
-            config.ADMIN_CHAT_ID, config.ADMIN_USER_ID,
+            "Нет цели модерации: ADMIN_CHAT_ID=%s, ADMIN_USER_IDS=%s, admin_chat_id в БД нет",
+            config.ADMIN_CHAT_ID, config.ADMIN_USER_IDS,
         )
         await safe_send(
             chat_id,
@@ -531,6 +558,7 @@ async def send_ad_to_moderation(chat_id, user_id, data, target):
         f"📨 Объявление #{ad_id} отправлено на модерацию.\nПосле проверки придёт уведомление.",
     )
 
+
 # ---------- admin: approve / reject ----------
 REJECT_REASONS = {
     "spam": "объявление расценено как спам",
@@ -538,6 +566,7 @@ REJECT_REASONS = {
     "contact": "некорректные контактные данные",
     "other": "не соответствует правилам канала",
 }
+
 
 async def admin_approve(chat_id, user_id, ad_id):
     ad = db.get_ad(ad_id)
@@ -581,6 +610,7 @@ async def admin_approve(chat_id, user_id, ad_id):
         log.exception("publish failed ad=%s", ad_id)
         await safe_send(chat_id, f"❌ Публикация #{ad_id}: {e}")
 
+
 async def admin_reject(chat_id, user_id, ad_id, reason_code):
     ad = db.get_ad(ad_id)
     if not ad or ad["status"] != "pending":
@@ -593,6 +623,7 @@ async def admin_reject(chat_id, user_id, ad_id, reason_code):
         f"❌ Объявление #{ad_id} отклонено модератором.\nПричина: {reason}.",
     )
     await safe_send(chat_id, f"🚫 #{ad_id} отклонено ({reason_code}).")
+
 
 # ---------- /my ----------
 async def cmd_my_ads(chat_id, user_id):
@@ -616,6 +647,7 @@ async def cmd_my_ads(chat_id, user_id):
         kb.adjust(1)
     await safe_send(chat_id, "\n".join(lines), keyboard=kb)
 
+
 async def delete_user_ad(chat_id, user_id, ad_id):
     ad = db.get_ad(ad_id)
     if not ad or ad["user_id"] != user_id:
@@ -634,6 +666,7 @@ async def delete_user_ad(chat_id, user_id, ad_id):
     except Exception as e:
         log.exception("delete failed ad=%s", ad_id)
         await safe_send(chat_id, f"❌ Не удалось удалить: {e}")
+
 
 async def repeat_user_ad(chat_id, user_id, ad_id):
     ad = db.get_ad(ad_id)
@@ -656,6 +689,7 @@ async def repeat_user_ad(chat_id, user_id, ad_id):
     # Автоматически отправляем на модерацию в тот же канал
     await safe_send(chat_id, f"⏳ Отправляю повторно на модерацию в канал «{target['name']}»...")
     await send_ad_to_moderation(chat_id, user_id, data, target)
+
 
 # ---------- /admin ----------
 async def cmd_admin(chat_id, user_id, text):
@@ -742,6 +776,7 @@ async def cmd_admin(chat_id, user_id, text):
 
     await safe_send(chat_id, "Неизвестная команда. /admin — справка.")
 
+
 # ---------- entrypoint ----------
 async def main():
     db.init_db()
@@ -749,9 +784,9 @@ async def main():
     channels = config.load_channels()
     log.info("=== БОТ ЗАПУЩЕН ===")
     log.info("Каналы: %s", [c["name"] for c in channels])
-    log.info("ADMIN_CHAT_ID=%s ADMIN_USER_ID=%s", config.ADMIN_CHAT_ID, config.ADMIN_USER_ID)
+    log.info("ADMIN_CHAT_ID=%s ADMIN_USER_IDS=%s", config.ADMIN_CHAT_ID, config.ADMIN_USER_IDS)
     if not config.ADMIN_CHAT_ID:
-        log.warning("ADMIN_CHAT_ID не задан — заявки пойдут в личку админа или потеряются!")
+        log.warning("ADMIN_CHAT_ID не задан — заявки пойдут в личку первого админа или потеряются!")
 
     try:
         from maxgram.types import BotCommand
@@ -766,6 +801,7 @@ async def main():
         log.warning("Не удалось зарегистрировать меню команд (это нормально, если библиотека не поддерживает): %s", e)
 
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
