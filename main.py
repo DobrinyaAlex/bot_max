@@ -360,10 +360,15 @@ async def cmd_my_ads(chat_id, user_id):
 async def delete_user_ad(chat_id, user_id, ad_id):
     ad = db.get_ad(ad_id)
     if not ad or ad["user_id"] != user_id or ad["status"] != "published": return
-    if await bot.delete_message(ad["channel_id"], ad["channel_msg_id"]):
-        db.update_ad_status(ad_id, "deleted")
+    
+    # Мягкое удаление: пытаемся удалить, но в БД меняем статус в любом случае
+    success = await bot.delete_message(ad["channel_id"], ad["channel_msg_id"])
+    db.update_ad_status(ad_id, "deleted")
+    
+    if success:
         await safe_send(chat_id, f"🗑 #{ad_id} удалено из канала.")
-    else: await safe_send(chat_id, "❌ Не удалось удалить.")
+    else:
+        await safe_send(chat_id, f"🗑 #{ad_id} уже было удалено из канала (статус обновлен).")
 
 async def repeat_user_ad(chat_id, user_id, ad_id):
     ad = db.get_ad(ad_id)
@@ -377,10 +382,9 @@ async def cmd_admin(chat_id, user_id, text):
     if not is_admin(user_id): return
     parts = text.split()
     if len(parts) == 1:
-        await safe_send(chat_id, "Админ-панель:\n/admin stats — общая статистика\n/admin stats channels — статистика по каналам\n/admin pending — заявки\n/admin ban <uid> [минут] — блок\n/admin unban <uid> — разблок"); return
+        await safe_send(chat_id, "Админ-панель:\n/admin stats\n/admin stats channels\n/admin pending\n/admin ban <uid>\n/admin unban <uid>"); return
     sub = parts[1].lower()
 
-    # --- НОВАЯ СТАТИСТИКА ПО КАНАЛАМ ---
     if sub == "stats" and len(parts) >= 3 and parts[2].lower() == "channels":
         stats_db = {s['channel_name']: s for s in db.stats_by_channel()}
         channels = config.load_channels()
@@ -395,21 +399,8 @@ async def cmd_admin(chat_id, user_id, text):
                 f"  ⏳ На модерации: {s['pending']}\n"
                 f"  🚫 Отклонено: {s['rejected']}"
             )
-        
-        # Добавляем каналы, которые есть в БД, но удалены из конфига (опционально)
-        for db_name, s in stats_db.items():
-            if not any(ch['name'] == db_name for ch in channels):
-                lines.append(
-                    f"\n📁 {db_name} (удален из конфига):\n"
-                    f"  Всего: {s['total']}\n"
-                    f"  ✅ Опубликовано: {s['published']}\n"
-                    f"  ⏳ На модерации: {s['pending']}\n"
-                    f"  🚫 Отклонено: {s['rejected']}"
-                )
-        await safe_send(chat_id, "\n".join(lines))
-        return
+        await safe_send(chat_id, "\n".join(lines)); return
 
-    # --- ОБЩАЯ СТАТИСТИКА ---
     if sub == "stats":
         s = db.stats()
         lines = [
