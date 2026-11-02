@@ -614,4 +614,214 @@ async def admin_approve(chat_id, ad_id):
         f"✅ Объявление #{ad_id} опубликовано в «{ad['channel_name']}».\n"
         f"Осталось: {limits['left']}/{limits['max']}.",
     )
-    await safe_send(chat_id, f"✅ #{ad_id} опубли
+    await safe_send(chat_id, f"✅ #{ad_id} опубликовано.")
+
+async def admin_reject(chat_id, ad_id, reason_code):
+    ad = db.get_ad(ad_id)
+    if not ad or ad["status"] != "pending":
+        return
+    reason = {
+        "spam": "спам",
+        "content": "лексика",
+        "contact": "контакты",
+        "other": "правила",
+    }.get(reason_code, "другое")
+    db.update_ad_rejected(ad_id, reason_code)
+    await safe_send(ad["chat_id"], f"❌ Объявление #{ad_id} отклонено.\nПричина: {reason}.")
+    await safe_send(chat_id, f"🚫 #{ad_id} отклонено.")
+
+# ---------- /my и действия с объявлениями ----------
+
+async def cmd_my_ads(chat_id, user_id):
+    ads = db.get_user_ads(user_id, limit=10)
+    if not ads:
+        await safe_send(chat_id, "У вас пока нет объявлений.")
+        return
+
+    status_map = {"pending": "⏳", "published": "✅", "rejected": "🚫", "deleted": "🗑"}
+    lines = ["Ваши последние объявления:"] + [
+        f"#{ad['id']} {status_map.get(ad['status'], '?')} — {ad['channel_name'] or '—'}"
+        for ad in ads
+    ]
+
+    btns = []
+    for ad in ads[:5]:
+        if ad["status"] == "published":
+            btns.append((f"🗑 Удалить #{ad['id']}", f"myads_delete_{ad['id']}"))
+        if ad["status"] in ("published", "rejected"):
+            btns.append((f"🔁 Повторить #{ad['id']}", f"myads_repeat_{ad['id']}"))
+
+    await safe_send(chat_id, "\n".join(lines), make_keyboard(btns) if btns else None)
+
+async def delete_user_ad(chat_id, user_id, ad_id):
+    ad = db.get_ad(ad_id)
+    if not ad or ad["user_id"] != user_id or ad["status"] != "published":
+        await safe_send(chat_id, f"⚠️ #{ad_id} нельзя удалить (не ваше или не опубликовано).")
+        return
+
+    # Старые объявления, опубликованные до фикса, имеют channel_msg_id = NULL
+    if not ad["channel_msg_id"]:
+        log.error("delete_user_ad: ad %s has NULL channel_msg_id", ad_id)
+        db.update_ad_status(ad_id, "deleted")
+        await safe_send(
+            chat_id,
+            f"⚠️ #{ad_id}: ID сообщения не сохранён (опубликовано старой версией бота).\n"
+            f"Удалите пост в канале «{ad['channel_name']}» вручную.\n"
+            f"Статус в боте обновлён на «удалено».",
+        )
+        return
+
+    ok, body = await bot.delete_message(ad["channel_id"], ad["channel_msg_id"])
+    # Soft-delete: статус обновляем в любом случае (по спеке п. 4Б PROJECT_CONTEXT)
+    db.update_ad_status(ad_id, "deleted")
+
+    if ok:
+        await safe_send(
+            chat_id, f"🗑 #{ad_id} удалено из канала «{ad['channel_name']}»."
+        )
+        return
+
+    err_text = str(body.get("error") or body.get("message") or body)
+    status_code = body.get("_status", 0)
+    is_not_found = (
+        status_code == 404
+        or "not found" in err_text.lower()
+        or "message_not_found" in err_text.lower()
+    )
+
+    if is_not_found:
+        await safe_send(
+            chat_id,
+            f"🗑 #{ad_id}: сообщение уже было удалено из канала. "
+            f"Статус в боте обновлён.",
+        )
+    else:
+        await safe_send(
+            chat_id,
+            f"⚠️ #{ad_id}: не удалось удалить из канала.\n"
+            f"Причина: {err_text}\n"
+            f"Статус в боте обновлён, но пост мог остаться. "
+            f"Удалите его вручную или обратитесь к администратору.",
+        )
+
+async def repeat_user_ad(chat_id, user_id, ad_id):
+    ad = db.get_ad(ad_id)
+    if not ad or ad["user_id"] != user_id:
+        return
+    target = {"id": ad["channel_id"], "name": ad["channel_name"]}
+    data = {
+        "ad_text": ad["ad_text"],
+        "name": ad["name"],
+        "phone": ad["phone"],
+        "photos": json.loads(ad["photos"] or "[]"),
+        "has_url": False,
+    }
+    await safe_send(chat_id, f"⏳ Отправляю на модерацию в «{target['name']}»...")
+    await send_ad_to_moderation(chat_id, user_id, data, target)
+
+# ---------- Админ-команды ----------
+
+async def cmd_admin(chat_id, user_id, text):
+    if not is_admin(user_id):
+        return
+    parts = text.split()
+    if len(parts) == 1:
+        await safe_send(
+            chat_id,
+            "Админ-панель:\n/admin stats\n/admin stats channels\n/admin pending\n"
+            "/admin ban <uid>\n/admin unban <uid>",
+        )
+        return
+    sub = parts[1].lower()
+
+    if sub == "stats" and len(parts) >= 3 and parts[2].lower() == "channels":
+        stats_db = {s["channel_name"]: s for s in db.stats_by_channel()}
+        channels = config.load_channels()
+
+        lines = ["📊 Статистика по каналам:"]
+        for ch in channels:
+            s = stats_db.get(
+                ch["name"],
+                {"total": 0, "published": 0, "pending": 0, "rejected": 0},
+            )
+            lines.append(
+                f"\n📁 {ch['name']}:\n"
+                f"  Всего: {s['total']}\n"
+                f"  ✅ Опубликовано: {s['published']}\n"
+                f"  ⏳ На модерации: {s['pending']}\n"
+                f"  🚫 Отклонено: {s['rejected']}"
+            )
+        await safe_send(chat_id, "\n".join(lines))
+        return
+
+    if sub == "stats":
+        s = db.stats()
+        lines = [
+            "📊 Общая статистика:",
+            f"Пользователей: {s['users']}",
+            f"Объявлений: {s['ads_total']}",
+            f"  ⏳ на модерации: {s['ads_pending']}",
+            f"  ✅ опубликовано: {s['ads_published']}",
+            f"  🚫 отклонено: {s['ads_rejected']}",
+            f"Заблокировано: {s['banned']}",
+            "",
+            "📢 Настроенные каналы:",
+        ]
+        for ch in config.load_channels():
+            lines.append(f"• {ch['name']} (ID: {ch['id']})")
+        await safe_send(chat_id, "\n".join(lines))
+        return
+
+    if sub == "pending":
+        ads = db.get_pending_ads()
+        await safe_send(chat_id, f"⏳ Заявок: {len(ads)}" if ads else "Заявок нет.")
+        return
+
+    if sub == "ban" and len(parts) >= 3:
+        uid = int(parts[2])
+        minutes = int(parts[3]) if len(parts) > 3 else 60
+        until = (
+            datetime.now(timezone.utc) + timedelta(minutes=minutes)
+        ).isoformat()
+        db.ban_user(uid, until, "admin ban")
+        await safe_send(chat_id, f"⛔ Забанен {uid}.")
+        return
+
+    if sub == "unban" and len(parts) >= 3:
+        db.unban_user(int(parts[2]))
+        await safe_send(chat_id, f"✅ Разбанен {parts[2]}.")
+        return
+
+# ---------- Точка входа ----------
+
+async def main():
+    db.init_db()
+    await bot.start()
+    log.info("=== БОТ ЗАПУЩЕН (pure aiohttp) ===")
+    offset = None
+    while True:
+        try:
+            for update in await bot.get_updates(offset):
+                offset = update.get("update_id", offset)
+                utype = update.get("update_type")
+                if utype == "message_created":
+                    await handle_message(update.get("message", {}))
+                elif utype == "message_callback":
+                    cb = update.get("callback", {})
+                    await bot.answer_callback(cb.get("callback_id"))
+                    await handle_callback(cb, update.get("message", {}))
+                elif utype == "bot_started":
+                    msg = update.get("message", {})
+                    chat_id = (
+                        msg.get("recipient", {}).get("chat_id")
+                        or update.get("chat_id")
+                    )
+                    user_id = msg.get("sender", {}).get("user_id") or chat_id
+                    await start_flow(chat_id, user_id)
+            await asyncio.sleep(1)
+        except Exception as e:
+            log.error(f"Polling error: {e}")
+            await asyncio.sleep(5)
+
+if __name__ == "__main__":
+    asyncio.run(main())
