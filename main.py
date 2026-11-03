@@ -1,10 +1,11 @@
 """MAX Bot v2 — объявления с пре-модерацией, голосом и FAQ (чистый aiohttp).
-Версия от 03.11.2026 (v12): добавлена справка по командам, улучшено меню.
+Версия от 03.11.2026 (v15): полная озвучка меню и всех статусов.
 """
 import asyncio
 import json
 import logging
 import random
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -214,12 +215,25 @@ def voice_enabled(user_id: int) -> bool:
 def set_voice_enabled(user_id: int, enabled: bool) -> None:
     db.set_setting(f"voice_{user_id}", "1" if enabled else "0")
 
+def clean_text_for_tts(text: str) -> str:
+    """Убирает эмодзи и markdown-символы, чтобы бот не читал их вслух."""
+    text = text.replace("**", "").replace("__", "").replace("`", "")
+    # Оставляем только буквы, цифры, пробелы и базовую пунктуацию
+    text = re.sub(r'[^\w\s\.,\?\!\-\:]', '', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
 async def send_voice_reply(chat_id: int, user_id: int, text: str) -> bool:
     if not voice_enabled(user_id):
         return False
+    
+    clean_text = clean_text_for_tts(text)
+    if not clean_text:
+        return False
+
     try:
-        log.info("TTS: Старт синтеза для текста: '%s'", text)
-        audio_bytes, path = await tts.synthesize_and_cleanup(text)
+        log.info("TTS: Старт синтеза для текста: '%s'", clean_text)
+        audio_bytes, path = await tts.synthesize_and_cleanup(clean_text)
         log.info("TTS: Синтез успешен, размер: %s байт", len(audio_bytes))
 
         token, err = await bot.upload_audio(audio_bytes)
@@ -315,13 +329,15 @@ def make_keyboard(buttons: list[tuple[str, str]]):
 # ---------- Главное меню и приветствие ----------
 
 async def show_main_menu(chat_id: int, user_id: int, is_start: bool = False):
-    voice_status = "🔊 Вкл" if voice_enabled(user_id) else "🔇 Выкл"
+    voice_status = "Включено" if voice_enabled(user_id) else "Выключено"
+    voice_icon = "🔊" if voice_enabled(user_id) else "🔇"
+    
     kb = make_keyboard([
         ("📝 Подать объявление", "menu_new_ad"),
         ("📋 Мои объявления", "menu_my_ads"),
         ("❓ FAQ", "menu_faq"),
         ("📖 Справка (команды)", "menu_help"),
-        (f"Озвучивание: {voice_status}", "menu_toggle_voice"),
+        (f"Озвучивание: {voice_icon} {voice_status}", "menu_toggle_voice"),
     ])
     
     if is_start:
@@ -330,29 +346,34 @@ async def show_main_menu(chat_id: int, user_id: int, is_start: bool = False):
             "Я помогу разместить объявление в тематических каналах.\n"
             "Выберите действие:"
         )
-        voice_text = "Добро пожаловать в Деловую Витрину! Я помогу разместить объявление в тематических каналах. Выберите действие в меню."
     else:
         text = "Главное меню.\nВыберите действие:"
-        voice_text = "Главное меню. Выберите действие."
+
+    # Дословная озвучка всех пунктов меню
+    voice_text = (
+        f"{text.replace('👋 ', '')} "
+        f"Доступные пункты меню: Подать объявление. Мои объявления. FAQ. Справка по командам. "
+        f"Озвучивание {voice_status}."
+    )
 
     await safe_send(chat_id, text, kb)
     await send_voice_reply(chat_id, user_id, voice_text)
 
 async def show_help_menu(chat_id: int, user_id: int):
     text = (
-        "🤖 **Доступные команды и действия:**\n\n"
-        "🔹 `/start` — Перезапустить бота и показать главное меню\n"
-        "🔹 `/menu` — Вернуться в главное меню\n"
-        "🔹 `/my` — Посмотреть, удалить или повторить ваши объявления\n"
-        "🔹 `/cancel` — Отменить текущее действие (например, заполнение объявления)\n"
-        "🔹 `/help` — Показать это сообщение\n\n"
-        "📝 **Как подать объявление:**\n"
+        "🤖 Доступные команды и действия:\n\n"
+        "🔹 /start — Перезапустить бота и показать главное меню\n"
+        "🔹 /menu — Вернуться в главное меню\n"
+        "🔹 /my — Посмотреть, удалить или повторить ваши объявления\n"
+        "🔹 /cancel — Отменить текущее действие (например, заполнение объявления)\n"
+        "🔹 /help — Показать это сообщение\n\n"
+        "📝 Как подать объявление:\n"
         "Нажмите «Подать объявление» в меню, пройдите капчу, введите текст, прикрепите фото (до 5 шт.), укажите имя и телефон.\n\n"
         "⏳ После этого объявление уйдет на ручную модерацию администратору. Если оно одобрено, оно появится в выбранном канале."
     )
     kb = make_keyboard([("⬅️ В меню", "menu_back")])
     await safe_send(chat_id, text, kb)
-    await send_voice_reply(chat_id, user_id, "Справка по командам. В главном меню вы можете подать объявление, посмотреть свои объявления, задать вопросы или изменить настройки озвучивания.")
+    await send_voice_reply(chat_id, user_id, text)
 
 async def show_faq_menu(chat_id: int, user_id: int):
     kb = make_keyboard([
@@ -410,13 +431,13 @@ async def start_ad_creation(chat_id: int, user_id: int):
     data = {"captcha_answer": str(a + b), "captcha_attempts": 0, "photos": []}
     session_set(chat_id, user_id, "captcha", data)
 
-    await safe_send(
-        chat_id,
+    text = (
         f"Осталось объявлений на сегодня: {limits['left']}/{limits['max']}.\n\n"
         f"Для подтверждения, что вы человек, решите пример: {a} + {b}.\n"
-        f"Введите только цифру ответа. Попыток: {config.CAPTCHA_MAX_ATTEMPTS}.",
+        f"Введите только цифру ответа. Попыток: {config.CAPTCHA_MAX_ATTEMPTS}."
     )
-    await send_voice_reply(chat_id, user_id, f"Для подтверждения, что вы человек, решите пример: {a} плюс {b}. Введите только цифру ответа.")
+    await safe_send(chat_id, text)
+    await send_voice_reply(chat_id, user_id, text)
 
 async def handle_captcha(chat_id, user_id, data, text):
     if not text:
@@ -426,7 +447,7 @@ async def handle_captcha(chat_id, user_id, data, text):
         session_set(chat_id, user_id, "text", data)
         msg = f"✅ Проверка пройдена!\nВведите текст объявления (до {config.MAX_TEXT_LEN} символов):"
         await safe_send(chat_id, msg)
-        await send_voice_reply(chat_id, user_id, "Проверка пройдена. Введите текст объявления.")
+        await send_voice_reply(chat_id, user_id, msg)
         return
 
     attempts = data.get("captcha_attempts", 0) + 1
@@ -473,7 +494,7 @@ async def handle_text(chat_id, user_id, data, text):
         f"Отправьте до {config.MAX_PHOTOS} фото или напишите «Готово»."
     )
     await safe_send(chat_id, msg_text)
-    await send_voice_reply(chat_id, user_id, "Текст принят. Отправьте фото или напишите Готово.")
+    await send_voice_reply(chat_id, user_id, msg_text)
 
 async def handle_photos(chat_id, user_id, data, msg_body, text):
     for att in msg_body.get("attachments", []):
@@ -484,27 +505,24 @@ async def handle_photos(chat_id, user_id, data, msg_body, text):
 
     if len(data["photos"]) >= config.MAX_PHOTOS:
         session_set(chat_id, user_id, "name", data)
-        await safe_send(
-            chat_id,
-            f"✅ Принято {config.MAX_PHOTOS} фото (максимум).\nУкажите имя продавца:",
-        )
-        await send_voice_reply(chat_id, user_id, "Принято максимум фото. Укажите имя продавца.")
+        msg = f"✅ Принято {config.MAX_PHOTOS} фото (максимум).\nУкажите имя продавца:"
+        await safe_send(chat_id, msg)
+        await send_voice_reply(chat_id, user_id, msg)
         return
 
     if text.lower() in ("готово", "без фото"):
         session_set(chat_id, user_id, "name", data)
         prefix = "" if data["photos"] else "Публикация без фото.\n"
-        await safe_send(chat_id, f"{prefix}Укажите имя продавца:")
-        await send_voice_reply(chat_id, user_id, f"{prefix}Укажите имя продавца.")
+        msg = f"{prefix}Укажите имя продавца:"
+        await safe_send(chat_id, msg)
+        await send_voice_reply(chat_id, user_id, msg)
         return
 
     if data["photos"]:
         session_set(chat_id, user_id, "photos", data)
-        await safe_send(
-            chat_id,
-            f"✅ Фото {len(data['photos'])}/{config.MAX_PHOTOS}. Загрузите ещё или напишите «Готово».",
-        )
-        await send_voice_reply(chat_id, user_id, "Фото принято. Загрузите ещё или напишите Готово.")
+        msg = f"✅ Фото {len(data['photos'])}/{config.MAX_PHOTOS}. Загрузите ещё или напишите «Готово»."
+        await safe_send(chat_id, msg)
+        await send_voice_reply(chat_id, user_id, msg)
         return
     await safe_send(chat_id, "Отправьте фото или напишите «Готово» / «Без фото».")
 
@@ -515,8 +533,9 @@ async def handle_name(chat_id, user_id, data, text):
         return
     data["name"] = res
     session_set(chat_id, user_id, "phone", data)
-    await safe_send(chat_id, "✅ Имя принято.\nУкажите контактный телефон.")
-    await send_voice_reply(chat_id, user_id, "Имя принято. Укажите контактный телефон.")
+    msg = "✅ Имя принято.\nУкажите контактный телефон."
+    await safe_send(chat_id, msg)
+    await send_voice_reply(chat_id, user_id, msg)
 
 async def handle_phone(chat_id, user_id, data, text):
     ok, res = validators.validate_phone(text)
@@ -543,13 +562,9 @@ async def show_preview(chat_id, user_id, data):
         except Exception as e:
             log.warning("Ошибка загрузки фото в предпросмотре: %s", e)
 
-    await safe_send(
-        chat_id,
-        f"📋 Предпросмотр:\n\n{format_post(data)}\n\nВсё верно?",
-        kb,
-        attachments or None,
-    )
-    await send_voice_reply(chat_id, user_id, "Предпросмотр объявления. Всё верно?")
+    text = f"📋 Предпросмотр:\n\n{format_post(data)}\n\nВсё верно?"
+    await safe_send(chat_id, text, kb, attachments or None)
+    await send_voice_reply(chat_id, user_id, text)
 
 async def ask_channel(chat_id, user_id, data):
     channels = config.load_channels()
@@ -558,12 +573,9 @@ async def ask_channel(chat_id, user_id, data):
         [(ch["name"], f"channel_{i}") for i, ch in enumerate(channels)]
     )
     session_set(chat_id, user_id, "channel", data)
-    await safe_send(
-        chat_id,
-        f"📢 В какой канал опубликовать?\nОсталось объявлений: {limits['left']}/{limits['max']}",
-        kb,
-    )
-    await send_voice_reply(chat_id, user_id, "В какой канал опубликовать? Выберите кнопку.")
+    text = f"📢 В какой канал опубликовать?\nОсталось объявлений: {limits['left']}/{limits['max']}"
+    await safe_send(chat_id, text, kb)
+    await send_voice_reply(chat_id, user_id, text)
 
 # ---------- Обработка сообщений ----------
 
@@ -669,7 +681,9 @@ async def handle_callback(callback, msg):
             return
         if payload == "cancel_ad":
             db.clear_session(chat_id)
-            await safe_send(chat_id, "Отменено.")
+            msg = "Действие отменено."
+            await safe_send(chat_id, msg)
+            await send_voice_reply(chat_id, user_id, msg)
             await show_main_menu(chat_id, user_id, is_start=False)
         elif payload == "edit_text":
             data["from_edit"] = True
@@ -753,8 +767,9 @@ async def send_ad_to_moderation(chat_id, user_id, data, target):
         f"{format_post(data)}"
     )
     await safe_send(admin_chat, admin_text, kb, attachments or None)
-    await safe_send(chat_id, f"📨 Объявление #{ad_id} отправлено на модерацию.")
-    await send_voice_reply(chat_id, user_id, "Объявление отправлено на модерацию.")
+    msg = f"📨 Объявление #{ad_id} отправлено на модерацию."
+    await safe_send(chat_id, msg)
+    await send_voice_reply(chat_id, user_id, msg)
 
 async def admin_approve(chat_id, ad_id):
     ad = db.get_ad(ad_id)
@@ -795,11 +810,12 @@ async def admin_approve(chat_id, ad_id):
     db.update_ad_published(ad_id, msg_id, now_iso())
     db.increment_daily_limit(ad["user_id"])
     limits = db.get_daily_limits(ad["user_id"], config.DAILY_AD_LIMIT)
-    await safe_send(
-        ad["chat_id"],
+    msg_text = (
         f"✅ Объявление #{ad_id} опубликовано в «{ad['channel_name']}».\n"
-        f"Осталось: {limits['left']}/{limits['max']}.",
+        f"Осталось: {limits['left']}/{limits['max']}."
     )
+    await safe_send(ad["chat_id"], msg_text)
+    await send_voice_reply(ad["chat_id"], ad["user_id"], msg_text)
     await safe_send(chat_id, f"✅ #{ad_id} опубликовано.")
 
 async def admin_reject(chat_id, ad_id, reason_code):
@@ -813,7 +829,10 @@ async def admin_reject(chat_id, ad_id, reason_code):
         "other": "правила",
     }.get(reason_code, "другое")
     db.update_ad_rejected(ad_id, reason_code)
-    await safe_send(ad["chat_id"], f"❌ Объявление #{ad_id} отклонено.\nПричина: {reason}.")
+    
+    msg_text = f"❌ Объявление #{ad_id} отклонено.\nПричина: {reason}."
+    await safe_send(ad["chat_id"], msg_text)
+    await send_voice_reply(ad["chat_id"], ad["user_id"], msg_text)
     await safe_send(chat_id, f"🚫 #{ad_id} отклонено.")
 
 # ---------- /my ----------
@@ -838,8 +857,9 @@ async def cmd_my_ads(chat_id, user_id):
             btns.append((f"🔁 Повторить #{ad['id']}", f"myads_repeat_{ad['id']}"))
 
     btns.append(("⬅️ В меню", "menu_back"))
-    await safe_send(chat_id, "\n".join(lines), make_keyboard(btns))
-    await send_voice_reply(chat_id, user_id, "Ваши последние объявления. Вы можете удалить или повторить их.")
+    text = "\n".join(lines)
+    await safe_send(chat_id, text, make_keyboard(btns))
+    await send_voice_reply(chat_id, user_id, text)
 
 async def delete_user_ad(chat_id, user_id, ad_id):
     ad = db.get_ad(ad_id)
@@ -850,21 +870,18 @@ async def delete_user_ad(chat_id, user_id, ad_id):
     if not ad["channel_msg_id"]:
         log.error("delete_user_ad: ad %s has NULL channel_msg_id", ad_id)
         db.update_ad_status(ad_id, "deleted")
-        await safe_send(
-            chat_id,
-            f"⚠️ #{ad_id}: ID сообщения не сохранён (опубликовано старой версией бота).\n"
-            f"Удалите пост в канале «{ad['channel_name']}» вручную.\n"
-            f"Статус в боте обновлён на «удалено».",
-        )
+        msg = f"⚠️ #{ad_id}: ID сообщения не сохранён. Удалите пост в канале вручную. Статус обновлён на «удалено»."
+        await safe_send(chat_id, msg)
+        await send_voice_reply(chat_id, user_id, msg)
         return
 
     ok, body = await bot.delete_message(ad["channel_id"], ad["channel_msg_id"])
     db.update_ad_status(ad_id, "deleted")
 
     if ok:
-        await safe_send(
-            chat_id, f"🗑 #{ad_id} удалено из канала «{ad['channel_name']}»."
-        )
+        msg = f"🗑 #{ad_id} удалено из канала «{ad['channel_name']}»."
+        await safe_send(chat_id, msg)
+        await send_voice_reply(chat_id, user_id, msg)
         return
 
     err_text = str(body.get("error") or body.get("message") or body)
@@ -876,19 +893,13 @@ async def delete_user_ad(chat_id, user_id, ad_id):
     )
 
     if is_not_found:
-        await safe_send(
-            chat_id,
-            f"🗑 #{ad_id}: сообщение уже было удалено из канала. "
-            f"Статус в боте обновлён.",
-        )
+        msg = f"🗑 #{ad_id}: сообщение уже было удалено из канала. Статус обновлён."
+        await safe_send(chat_id, msg)
+        await send_voice_reply(chat_id, user_id, msg)
     else:
-        await safe_send(
-            chat_id,
-            f"⚠️ #{ad_id}: не удалось удалить из канала.\n"
-            f"Причина: {err_text}\n"
-            f"Статус в боте обновлён, но пост мог остаться. "
-            f"Удалите его вручную или обратитесь к администратору.",
-        )
+        msg = f"⚠️ #{ad_id}: не удалось удалить из канала. Причина: {err_text}. Статус обновлён."
+        await safe_send(chat_id, msg)
+        await send_voice_reply(chat_id, user_id, msg)
 
 async def repeat_user_ad(chat_id, user_id, ad_id):
     ad = db.get_ad(ad_id)
@@ -984,7 +995,7 @@ async def main():
     db.init_db()
     await bot.start()
 
-    log.info("=== БОТ ЗАПУЩЕН (v12 TTS-HelpMenu) ===")
+    log.info("=== БОТ ЗАПУЩЕН (v15 TTS-FullVoice) ===")
     offset = None
     while True:
         try:
