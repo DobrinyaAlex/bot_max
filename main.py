@@ -1,5 +1,5 @@
 """MAX Bot v2 — объявления с пре-модерацией, голосом и FAQ (чистый aiohttp).
-Версия от 03.11.2026 (v2): исправлен порядок появления капчи.
+Версия от 03.11.2026 (v4): добавлен резервный gTTS и вывод ошибок в чат.
 """
 import asyncio
 import json
@@ -124,6 +124,7 @@ class MAXBot:
             return False, {"error": str(e), "_status": 0}
 
     async def upload_audio(self, audio_bytes: bytes) -> str | None:
+        # В MAX API аудио загружается через type=audio
         url = "https://platform-api2.max.ru/uploads?type=audio"
         try:
             async with self.session.post(url, headers=self.headers) as r:
@@ -227,21 +228,21 @@ async def send_voice_reply(chat_id: int, user_id: int, text: str) -> bool:
             pass
         if not token:
             log.warning("send_voice_reply: no token for text len=%s", len(text))
-            return False
+            raise RuntimeError("MAX API не вернул token для аудио.")
         attachment = {"type": "audio", "payload": {"token": token}}
         res = await bot.send_message(chat_id, "", attachments=[attachment])
-        return bool(res) and not res.get("error")
+        if res.get("error"):
+            raise RuntimeError(f"Ошибка отправки аудио: {res.get('error')}")
+        return True
     except Exception as e:
         log.exception("send_voice_reply failed: %s", e)
+        # Отправляем ошибку пользователю, чтобы он видел, в чем дело
+        if "Озвучивание включено" in text:
+            await safe_send(chat_id, f"⚠️ Ошибка озвучки: {e}")
         return False
 
 async def safe_send(chat_id: int, text: str, keyboard=None, attachments=None) -> bool:
     return bool(await bot.send_message(chat_id, text, keyboard, attachments))
-
-async def alert_admin(text: str) -> None:
-    target = moderation_target()
-    if target:
-        await bot.send_message(target, text)
 
 # ---------- Сессии ----------
 
@@ -285,12 +286,12 @@ def make_keyboard(buttons: list[tuple[str, str]]):
 # ---------- Главное меню и приветствие ----------
 
 async def show_main_menu(chat_id: int, user_id: int):
-    voice = "🔊 Вкл" if voice_enabled(user_id) else "🔇 Выкл"
+    voice_status = "🔊 Вкл" if voice_enabled(user_id) else "🔇 Выкл"
     kb = make_keyboard([
         ("📝 Подать объявление", "menu_new_ad"),
         ("📋 Мои объявления", "menu_my_ads"),
         ("❓ FAQ", "menu_faq"),
-        (f"{voice} озвучивание", "menu_toggle_voice"),
+        (f"Озвучивание: {voice_status} (нажмите чтобы изменить)", "menu_toggle_voice"),
     ])
     text = (
         "👋 Добро пожаловать в «Деловую Витрину»!\n\n"
@@ -323,7 +324,6 @@ async def show_faq_answer(chat_id: int, key: str):
 # ---------- Сценарий создания объявления ----------
 
 async def start_flow(chat_id: int, user_id: int) -> None:
-    """Показывает главное меню при старте."""
     if chat_id < 0:
         return
     db.upsert_user(user_id)
@@ -343,7 +343,6 @@ async def start_flow(chat_id: int, user_id: int) -> None:
     )
 
 async def start_ad_creation(chat_id: int, user_id: int):
-    """Запускает процесс подачи объявления (с проверкой капчи)."""
     db.upsert_user(user_id)
     banned = db.is_banned(user_id)
     if banned:
@@ -586,8 +585,14 @@ async def handle_callback(callback, msg):
     if payload == "menu_toggle_voice":
         new_state = not voice_enabled(user_id)
         set_voice_enabled(user_id, new_state)
-        status = "включено" if new_state else "выключено"
-        await safe_send(chat_id, f"🔊 Озвучивание {status}.")
+        if new_state:
+            await safe_send(chat_id, "🔊 Озвучивание включено. Отправляю тестовое сообщение...")
+            ok = await send_voice_reply(chat_id, user_id, "Озвучивание включено.")
+            if not ok:
+                # Функция send_voice_reply сама отправит текст ошибки, если она есть
+                pass
+        else:
+            await safe_send(chat_id, "🔇 Озвучивание выключено.")
         await show_main_menu(chat_id, user_id)
         return
 
@@ -915,6 +920,7 @@ async def cmd_admin(chat_id, user_id, text):
 async def main():
     db.init_db()
     await bot.start()
+    
     log.info("=== БОТ ЗАПУЩЕН (pure aiohttp, TTS, FAQ) ===")
     offset = None
     while True:
