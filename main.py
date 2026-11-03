@@ -1,5 +1,5 @@
 """MAX Bot v2 — объявления с пре-модерацией, голосом и FAQ (чистый aiohttp).
-Версия от 03.11.2026 (v4): добавлен резервный gTTS и вывод ошибок в чат.
+Версия от 03.11.2026 (v6): добавлен content_type при загрузке аудио.
 """
 import asyncio
 import json
@@ -123,27 +123,33 @@ class MAXBot:
             log.exception("delete_message exception: %s", e)
             return False, {"error": str(e), "_status": 0}
 
-    async def upload_audio(self, audio_bytes: bytes) -> str | None:
-        # В MAX API аудио загружается через type=audio
+    async def upload_audio(self, audio_bytes: bytes) -> tuple[str | None, str]:
+        """Загружает MP3 в MAX и возвращает (token, error_message)."""
         url = "https://platform-api2.max.ru/uploads?type=audio"
         try:
+            log.info("MAX API: Запрос URL для загрузки аудио...")
             async with self.session.post(url, headers=self.headers) as r:
                 if r.status != 200:
-                    log.error("upload_audio get url failed: %s %s", r.status, await r.text())
-                    return None
+                    err = await r.text()
+                    log.error("upload_audio get url failed: %s %s", r.status, err)
+                    return None, f"HTTP {r.status} при запросе URL: {err}"
                 payload = await r.json()
                 upload_url = payload.get("url")
                 if not upload_url:
                     log.error("upload_audio: no url in response: %s", payload)
-                    return None
+                    return None, f"MAX не вернул upload_url. Ответ: {payload}"
 
+            log.info("MAX API: Отправка файла по URL %s", upload_url)
             form = aiohttp.FormData()
-            form.add_field("data", audio_bytes, filename="voice.mp3")
+            # Добавляем content_type, чтобы MAX понимал, что это аудио
+            form.add_field("data", audio_bytes, filename="voice.mp3", content_type="audio/mpeg")
             async with self.session.post(upload_url, data=form) as r:
                 if r.status != 200:
-                    log.error("upload_audio upload failed: %s %s", r.status, await r.text())
-                    return None
+                    err = await r.text()
+                    log.error("upload_audio upload failed: %s %s", r.status, err)
+                    return None, f"HTTP {r.status} при загрузке файла: {err}"
                 res = await r.json()
+                log.info("MAX API: Ответ на загрузку: %s", res)
                 token = res.get("token")
                 if not token:
                     for v in res.values():
@@ -152,10 +158,11 @@ class MAXBot:
                             break
                 if not token:
                     log.error("upload_audio: no token in response: %s", res)
-                return token
+                    return None, f"В ответе нет token. Ответ: {res}"
+                return token, ""
         except Exception as e:
             log.exception("upload_audio exception: %s", e)
-            return None
+            return None, str(e)
 
 bot = MAXBot(config.BOT_TOKEN)
 _last_msg_ts: dict[int, float] = {}
@@ -219,24 +226,31 @@ async def send_voice_reply(chat_id: int, user_id: int, text: str) -> bool:
     if not voice_enabled(user_id):
         return False
     try:
+        log.info("TTS: Старт синтеза для текста: '%s'", text)
         audio_bytes, path = await tts.synthesize_and_cleanup(text)
-        token = await bot.upload_audio(audio_bytes)
+        log.info("TTS: Синтез успешен, размер: %s байт", len(audio_bytes))
+        
+        token, err = await bot.upload_audio(audio_bytes)
         try:
             import os
             os.unlink(path)
         except Exception:
             pass
+
         if not token:
-            log.warning("send_voice_reply: no token for text len=%s", len(text))
-            raise RuntimeError("MAX API не вернул token для аудио.")
+            raise RuntimeError(f"Ошибка загрузки аудио в MAX: {err}")
+
+        log.info("TTS: Отправка аудио-сообщения в чат %s...", chat_id)
         attachment = {"type": "audio", "payload": {"token": token}}
         res = await bot.send_message(chat_id, "", attachments=[attachment])
-        if res.get("error"):
-            raise RuntimeError(f"Ошибка отправки аудио: {res.get('error')}")
+        log.info("TTS: Ответ на отправку: %s", res)
+        
+        if res.get("error") or res.get("ok") is False:
+            raise RuntimeError(f"Ошибка отправки аудио: {res}")
+            
         return True
     except Exception as e:
         log.exception("send_voice_reply failed: %s", e)
-        # Отправляем ошибку пользователю, чтобы он видел, в чем дело
         if "Озвучивание включено" in text:
             await safe_send(chat_id, f"⚠️ Ошибка озвучки: {e}")
         return False
@@ -337,6 +351,7 @@ async def start_flow(chat_id: int, user_id: int) -> None:
         return
 
     await show_main_menu(chat_id, user_id)
+    # Озвучиваем приветствие только если включено
     await send_voice_reply(
         chat_id, user_id,
         "Добро пожаловать в Деловую Витрину. Выберите действие в меню."
@@ -921,7 +936,7 @@ async def main():
     db.init_db()
     await bot.start()
     
-    log.info("=== БОТ ЗАПУЩЕН (pure aiohttp, TTS, FAQ) ===")
+    log.info("=== БОТ ЗАПУЩЕН (v6 TTS-Final) ===")
     offset = None
     while True:
         try:
