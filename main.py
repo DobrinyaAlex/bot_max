@@ -1,5 +1,5 @@
 """MAX Bot v2 — объявления с пре-модерацией, голосом и FAQ (чистый aiohttp).
-Версия от 03.11.2026 (v10): озвучка меню, FAQ и всех шагов.
+Версия от 03.11.2026 (v12): добавлена справка по командам, улучшено меню.
 """
 import asyncio
 import json
@@ -314,21 +314,45 @@ def make_keyboard(buttons: list[tuple[str, str]]):
 
 # ---------- Главное меню и приветствие ----------
 
-async def show_main_menu(chat_id: int, user_id: int):
+async def show_main_menu(chat_id: int, user_id: int, is_start: bool = False):
     voice_status = "🔊 Вкл" if voice_enabled(user_id) else "🔇 Выкл"
     kb = make_keyboard([
         ("📝 Подать объявление", "menu_new_ad"),
         ("📋 Мои объявления", "menu_my_ads"),
         ("❓ FAQ", "menu_faq"),
-        (f"Озвучивание: {voice_status} (нажмите чтобы изменить)", "menu_toggle_voice"),
+        ("📖 Справка (команды)", "menu_help"),
+        (f"Озвучивание: {voice_status}", "menu_toggle_voice"),
     ])
-    text = (
-        "👋 Добро пожаловать в «Деловую Витрину»!\n\n"
-        "Я помогу разместить объявление в тематических каналах.\n"
-        "Выберите действие:"
-    )
+    
+    if is_start:
+        text = (
+            "👋 Добро пожаловать в «Деловую Витрину»!\n\n"
+            "Я помогу разместить объявление в тематических каналах.\n"
+            "Выберите действие:"
+        )
+        voice_text = "Добро пожаловать в Деловую Витрину! Я помогу разместить объявление в тематических каналах. Выберите действие в меню."
+    else:
+        text = "Главное меню.\nВыберите действие:"
+        voice_text = "Главное меню. Выберите действие."
+
     await safe_send(chat_id, text, kb)
-    await send_voice_reply(chat_id, user_id, "Главное меню. Выберите действие: Подать объявление, Мои объявления, FAQ, или настройки озвучивания.")
+    await send_voice_reply(chat_id, user_id, voice_text)
+
+async def show_help_menu(chat_id: int, user_id: int):
+    text = (
+        "🤖 **Доступные команды и действия:**\n\n"
+        "🔹 `/start` — Перезапустить бота и показать главное меню\n"
+        "🔹 `/menu` — Вернуться в главное меню\n"
+        "🔹 `/my` — Посмотреть, удалить или повторить ваши объявления\n"
+        "🔹 `/cancel` — Отменить текущее действие (например, заполнение объявления)\n"
+        "🔹 `/help` — Показать это сообщение\n\n"
+        "📝 **Как подать объявление:**\n"
+        "Нажмите «Подать объявление» в меню, пройдите капчу, введите текст, прикрепите фото (до 5 шт.), укажите имя и телефон.\n\n"
+        "⏳ После этого объявление уйдет на ручную модерацию администратору. Если оно одобрено, оно появится в выбранном канале."
+    )
+    kb = make_keyboard([("⬅️ В меню", "menu_back")])
+    await safe_send(chat_id, text, kb)
+    await send_voice_reply(chat_id, user_id, "Справка по командам. В главном меню вы можете подать объявление, посмотреть свои объявления, задать вопросы или изменить настройки озвучивания.")
 
 async def show_faq_menu(chat_id: int, user_id: int):
     kb = make_keyboard([
@@ -368,7 +392,7 @@ async def start_flow(chat_id: int, user_id: int) -> None:
         await safe_send(chat_id, f"⛔ Вы заблокированы до {banned['banned_until']}.")
         return
 
-    await show_main_menu(chat_id, user_id)
+    await show_main_menu(chat_id, user_id, is_start=True)
 
 async def start_ad_creation(chat_id: int, user_id: int):
     db.upsert_user(user_id)
@@ -478,9 +502,9 @@ async def handle_photos(chat_id, user_id, data, msg_body, text):
         session_set(chat_id, user_id, "photos", data)
         await safe_send(
             chat_id,
-            f"✅ Фото {len(data['photos'])}/{config.MAX_PHOTOS}. Ещё или «Готово».",
+            f"✅ Фото {len(data['photos'])}/{config.MAX_PHOTOS}. Загрузите ещё или напишите «Готово».",
         )
-        await send_voice_reply(chat_id, user_id, "Фото принято. Ещё или Готово.")
+        await send_voice_reply(chat_id, user_id, "Фото принято. Загрузите ещё или напишите Готово.")
         return
     await safe_send(chat_id, "Отправьте фото или напишите «Готово» / «Без фото».")
 
@@ -556,14 +580,14 @@ async def handle_message(msg):
         await start_flow(chat_id, user_id)
         return
     if text == "/menu":
-        await show_main_menu(chat_id, user_id)
+        await show_main_menu(chat_id, user_id, is_start=False)
         return
     if text == "/cancel":
         db.clear_session(chat_id)
         await safe_send(chat_id, "Отменено.")
         return
     if text == "/help":
-        await safe_send(chat_id, "Команды:\n/start — главное меню\n/my — мои объявления\n/cancel — отменить\n/help — справка")
+        await show_help_menu(chat_id, user_id)
         return
     if text == "/my":
         await cmd_my_ads(chat_id, user_id)
@@ -579,7 +603,7 @@ async def handle_message(msg):
 
     state, data = session_get(chat_id)
     if state is None:
-        await show_main_menu(chat_id, user_id)
+        await show_main_menu(chat_id, user_id, is_start=False)
         return
 
     if state == "captcha":
@@ -614,8 +638,11 @@ async def handle_callback(callback, msg):
     if payload == "menu_faq":
         await show_faq_menu(chat_id, user_id)
         return
+    if payload == "menu_help":
+        await show_help_menu(chat_id, user_id)
+        return
     if payload == "menu_back":
-        await show_main_menu(chat_id, user_id)
+        await show_main_menu(chat_id, user_id, is_start=False)
         return
     if payload == "menu_toggle_voice":
         new_state = not voice_enabled(user_id)
@@ -627,7 +654,7 @@ async def handle_callback(callback, msg):
                 pass
         else:
             await safe_send(chat_id, "🔇 Озвучивание выключено.")
-        await show_main_menu(chat_id, user_id)
+        await show_main_menu(chat_id, user_id, is_start=False)
         return
 
     # FAQ
@@ -643,7 +670,7 @@ async def handle_callback(callback, msg):
         if payload == "cancel_ad":
             db.clear_session(chat_id)
             await safe_send(chat_id, "Отменено.")
-            await show_main_menu(chat_id, user_id)
+            await show_main_menu(chat_id, user_id, is_start=False)
         elif payload == "edit_text":
             data["from_edit"] = True
             data["ad_text"] = ""
@@ -957,7 +984,7 @@ async def main():
     db.init_db()
     await bot.start()
 
-    log.info("=== БОТ ЗАПУЩЕН (v10 TTS-MenuVoice) ===")
+    log.info("=== БОТ ЗАПУЩЕН (v12 TTS-HelpMenu) ===")
     offset = None
     while True:
         try:
