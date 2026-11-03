@@ -1,5 +1,5 @@
 """MAX Bot v2 — объявления с пре-модерацией, голосом и FAQ (чистый aiohttp).
-Версия от 03.11.2026 (v16): исправлена озвучка дробей, плюса и справки.
+Версия от 03.11.2026 (v17): исправлена озвучка (символы, фото, дроби) и retry для MAX API.
 """
 import asyncio
 import json
@@ -218,6 +218,10 @@ def set_voice_enabled(user_id: int, enabled: bool) -> None:
 def clean_text_for_tts(text: str) -> str:
     """Убирает эмодзи и markdown-символы, чтобы бот не читал их вслух."""
     text = text.replace("**", "").replace("__", "").replace("`", "")
+    text = text.replace("«", "").replace("»", "").replace('"', "")
+    text = text.replace("/", " из ")
+    text = text.replace("#", " номер ")
+    text = text.replace("+", " плюс ")
     # Оставляем только буквы, цифры, пробелы и базовую пунктуацию
     text = re.sub(r'[^\w\s\.,\?\!\-\:]', '', text)
     text = re.sub(r'\s+', ' ', text)
@@ -246,11 +250,12 @@ async def send_voice_reply(chat_id: int, user_id: int, text: str) -> bool:
         if not token:
             raise RuntimeError(f"Ошибка загрузки аудио в MAX: {err}")
 
-        await asyncio.sleep(1.0)
+        # Даём серверу время на обработку файла перед первой попыткой
+        await asyncio.sleep(2.0)
 
         attachment = {"type": "audio", "payload": {"token": token}}
-        max_retries = 4
-        delay = 1.0
+        max_retries = 12
+        delay = 1.5
         last_res = None
 
         for attempt in range(1, max_retries + 1):
@@ -270,7 +275,7 @@ async def send_voice_reply(chat_id: int, user_id: int, text: str) -> bool:
                         delay,
                     )
                     await asyncio.sleep(delay)
-                    delay *= 2
+                    delay = min(delay * 1.5, 5.0)
                     continue
                 else:
                     break
@@ -469,7 +474,7 @@ async def handle_captcha(chat_id, user_id, data, text):
     session_set(chat_id, user_id, "captcha", data)
     await safe_send(
         chat_id,
-        f"❌ Неверно. Попытка {attempts}/{config.CAPTCHA_MAX_ATTEMPTS}. Новый пример: {a} плюс {b}.",
+        f"❌ Неверно. Попытка {attempts} из {config.CAPTCHA_MAX_ATTEMPTS}. Новый пример: {a} плюс {b}.",
     )
 
 async def handle_text(chat_id, user_id, data, text):
@@ -493,8 +498,12 @@ async def handle_text(chat_id, user_id, data, text):
         f"✅ Текст принят ({len(msg)}/{config.MAX_TEXT_LEN}).{extra}\n"
         f"Отправьте до {config.MAX_PHOTOS} фото или напишите «Готово»."
     )
+    voice_text = (
+        f"Текст принят. {len(msg)} символов из {config.MAX_TEXT_LEN}. "
+        f"Отправьте до {config.MAX_PHOTOS} фото или напишите Готово."
+    )
     await safe_send(chat_id, msg_text)
-    await send_voice_reply(chat_id, user_id, msg_text)
+    await send_voice_reply(chat_id, user_id, voice_text)
 
 async def handle_photos(chat_id, user_id, data, msg_body, text):
     for att in msg_body.get("attachments", []):
@@ -506,23 +515,26 @@ async def handle_photos(chat_id, user_id, data, msg_body, text):
     if len(data["photos"]) >= config.MAX_PHOTOS:
         session_set(chat_id, user_id, "name", data)
         msg = f"✅ Принято {config.MAX_PHOTOS} фото (максимум).\nУкажите имя продавца:"
+        voice = f"Принято {config.MAX_PHOTOS} фото. Это максимум. Укажите имя продавца."
         await safe_send(chat_id, msg)
-        await send_voice_reply(chat_id, user_id, msg)
+        await send_voice_reply(chat_id, user_id, voice)
         return
 
     if text.lower() in ("готово", "без фото"):
         session_set(chat_id, user_id, "name", data)
         prefix = "" if data["photos"] else "Публикация без фото.\n"
         msg = f"{prefix}Укажите имя продавца:"
+        voice = f"{prefix}Укажите имя продавца."
         await safe_send(chat_id, msg)
-        await send_voice_reply(chat_id, user_id, msg)
+        await send_voice_reply(chat_id, user_id, voice)
         return
 
     if data["photos"]:
         session_set(chat_id, user_id, "photos", data)
         msg = f"✅ Фото {len(data['photos'])}/{config.MAX_PHOTOS}. Загрузите ещё или напишите «Готово»."
+        voice = f"Фото {len(data['photos'])} из {config.MAX_PHOTOS} принято. Загрузите ещё или напишите Готово."
         await safe_send(chat_id, msg)
-        await send_voice_reply(chat_id, user_id, msg)
+        await send_voice_reply(chat_id, user_id, voice)
         return
     await safe_send(chat_id, "Отправьте фото или напишите «Готово» / «Без фото».")
 
@@ -563,8 +575,9 @@ async def show_preview(chat_id, user_id, data):
             log.warning("Ошибка загрузки фото в предпросмотре: %s", e)
 
     text = f"📋 Предпросмотр:\n\n{format_post(data)}\n\nВсё верно?"
+    voice_text = "Предпросмотр объявления. Всё верно?"
     await safe_send(chat_id, text, kb, attachments or None)
-    await send_voice_reply(chat_id, user_id, text)
+    await send_voice_reply(chat_id, user_id, voice_text)
 
 async def ask_channel(chat_id, user_id, data):
     channels = config.load_channels()
@@ -574,8 +587,9 @@ async def ask_channel(chat_id, user_id, data):
     )
     session_set(chat_id, user_id, "channel", data)
     text = f"📢 В какой канал опубликовать?\nОсталось объявлений: {limits['left']} из {limits['max']}"
+    voice_text = f"В какой канал опубликовать? Осталось объявлений: {limits['left']} из {limits['max']}. Выберите кнопку."
     await safe_send(chat_id, text, kb)
-    await send_voice_reply(chat_id, user_id, text)
+    await send_voice_reply(chat_id, user_id, voice_text)
 
 # ---------- Обработка сообщений ----------
 
@@ -812,10 +826,14 @@ async def admin_approve(chat_id, ad_id):
     limits = db.get_daily_limits(ad["user_id"], config.DAILY_AD_LIMIT)
     msg_text = (
         f"✅ Объявление #{ad_id} опубликовано в «{ad['channel_name']}».\n"
-        f"Осталось: {limits['left']}/{limits['max']}."
+        f"Осталось: {limits['left']} из {limits['max']}."
+    )
+    voice_text = (
+        f"Объявление номер {ad_id} опубликовано в канале {ad['channel_name']}. "
+        f"Осталось объявлений: {limits['left']} из {limits['max']}."
     )
     await safe_send(ad["chat_id"], msg_text)
-    await send_voice_reply(ad["chat_id"], ad["user_id"], msg_text)
+    await send_voice_reply(ad["chat_id"], ad["user_id"], voice_text)
     await safe_send(chat_id, f"✅ #{ad_id} опубликовано.")
 
 async def admin_reject(chat_id, ad_id, reason_code):
@@ -831,8 +849,9 @@ async def admin_reject(chat_id, ad_id, reason_code):
     db.update_ad_rejected(ad_id, reason_code)
     
     msg_text = f"❌ Объявление #{ad_id} отклонено.\nПричина: {reason}."
+    voice_text = f"Объявление номер {ad_id} отклонено. Причина: {reason}."
     await safe_send(ad["chat_id"], msg_text)
-    await send_voice_reply(ad["chat_id"], ad["user_id"], msg_text)
+    await send_voice_reply(ad["chat_id"], ad["user_id"], voice_text)
     await safe_send(chat_id, f"🚫 #{ad_id} отклонено.")
 
 # ---------- /my ----------
@@ -858,8 +877,9 @@ async def cmd_my_ads(chat_id, user_id):
 
     btns.append(("⬅️ В меню", "menu_back"))
     text = "\n".join(lines)
+    voice_text = "Ваши последние объявления. Вы можете удалить или повторить их."
     await safe_send(chat_id, text, make_keyboard(btns))
-    await send_voice_reply(chat_id, user_id, text)
+    await send_voice_reply(chat_id, user_id, voice_text)
 
 async def delete_user_ad(chat_id, user_id, ad_id):
     ad = db.get_ad(ad_id)
@@ -880,8 +900,9 @@ async def delete_user_ad(chat_id, user_id, ad_id):
 
     if ok:
         msg = f"🗑 #{ad_id} удалено из канала «{ad['channel_name']}»."
+        voice = f"Объявление номер {ad_id} удалено из канала {ad['channel_name']}."
         await safe_send(chat_id, msg)
-        await send_voice_reply(chat_id, user_id, msg)
+        await send_voice_reply(chat_id, user_id, voice)
         return
 
     err_text = str(body.get("error") or body.get("message") or body)
@@ -894,12 +915,14 @@ async def delete_user_ad(chat_id, user_id, ad_id):
 
     if is_not_found:
         msg = f"🗑 #{ad_id}: сообщение уже было удалено из канала. Статус обновлён."
+        voice = f"Объявление номер {ad_id} уже было удалено из канала. Статус обновлён."
         await safe_send(chat_id, msg)
-        await send_voice_reply(chat_id, user_id, msg)
+        await send_voice_reply(chat_id, user_id, voice)
     else:
         msg = f"⚠️ #{ad_id}: не удалось удалить из канала. Причина: {err_text}. Статус обновлён."
+        voice = f"Не удалось удалить объявление номер {ad_id} из канала. Статус обновлён."
         await safe_send(chat_id, msg)
-        await send_voice_reply(chat_id, user_id, msg)
+        await send_voice_reply(chat_id, user_id, voice)
 
 async def repeat_user_ad(chat_id, user_id, ad_id):
     ad = db.get_ad(ad_id)
@@ -995,7 +1018,7 @@ async def main():
     db.init_db()
     await bot.start()
 
-    log.info("=== БОТ ЗАПУЩЕН (v16 TTS-Fixes) ===")
+    log.info("=== БОТ ЗАПУЩЕН (v17 TTS-SlashFix) ===")
     offset = None
     while True:
         try:
