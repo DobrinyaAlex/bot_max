@@ -1,5 +1,5 @@
 """MAX Bot v2 — объявления с пре-модерацией, голосом и FAQ (чистый aiohttp).
-Версия от 03.11.2026 (v9): озвучка включена по умолчанию.
+Версия от 03.11.2026 (v10): озвучка меню, FAQ и всех шагов.
 """
 import asyncio
 import json
@@ -207,7 +207,6 @@ def moderation_target() -> int | None:
 def voice_enabled(user_id: int) -> bool:
     val = db.get_setting(f"voice_{user_id}")
     if val is None:
-        # По умолчанию включено для новых пользователей
         set_voice_enabled(user_id, True)
         return True
     return val == "1"
@@ -233,7 +232,6 @@ async def send_voice_reply(chat_id: int, user_id: int, text: str) -> bool:
         if not token:
             raise RuntimeError(f"Ошибка загрузки аудио в MAX: {err}")
 
-        # Даём серверу время на обработку файла перед первой попыткой
         await asyncio.sleep(1.0)
 
         attachment = {"type": "audio", "payload": {"token": token}}
@@ -263,7 +261,6 @@ async def send_voice_reply(chat_id: int, user_id: int, text: str) -> bool:
                 else:
                     break
             else:
-                # Другая ошибка — нет смысла повторять
                 break
 
         raise RuntimeError(f"Ошибка отправки аудио: {last_res}")
@@ -331,8 +328,9 @@ async def show_main_menu(chat_id: int, user_id: int):
         "Выберите действие:"
     )
     await safe_send(chat_id, text, kb)
+    await send_voice_reply(chat_id, user_id, "Главное меню. Выберите действие: Подать объявление, Мои объявления, FAQ, или настройки озвучивания.")
 
-async def show_faq_menu(chat_id: int):
+async def show_faq_menu(chat_id: int, user_id: int):
     kb = make_keyboard([
         ("Как подать объявление?", "faq_how"),
         ("Сколько стоит?", "faq_price"),
@@ -341,8 +339,9 @@ async def show_faq_menu(chat_id: int):
         ("⬅️ Назад", "menu_back"),
     ])
     await safe_send(chat_id, "❓ Частые вопросы:", kb)
+    await send_voice_reply(chat_id, user_id, "Частые вопросы. Выберите вопрос из списка.")
 
-async def show_faq_answer(chat_id: int, key: str):
+async def show_faq_answer(chat_id: int, user_id: int, key: str):
     answers = {
         "faq_how": "Чтобы подать объявление, нажмите «📝 Подать объявление» в главном меню. Бот проведёт вас по шагам: капча, текст, фото, имя, телефон и выбор канала.",
         "faq_price": "Размещение объявлений бесплатно. Ограничение — до 6 объявлений в сутки с одного аккаунта.",
@@ -352,6 +351,7 @@ async def show_faq_answer(chat_id: int, key: str):
     text = answers.get(key, "Информация не найдена.")
     kb = make_keyboard([("⬅️ Назад к FAQ", "menu_faq")])
     await safe_send(chat_id, text, kb)
+    await send_voice_reply(chat_id, user_id, text)
 
 # ---------- Сценарий создания объявления ----------
 
@@ -369,10 +369,6 @@ async def start_flow(chat_id: int, user_id: int) -> None:
         return
 
     await show_main_menu(chat_id, user_id)
-    await send_voice_reply(
-        chat_id, user_id,
-        "Добро пожаловать в Деловую Витрину. Выберите действие в меню."
-    )
 
 async def start_ad_creation(chat_id: int, user_id: int):
     db.upsert_user(user_id)
@@ -396,6 +392,7 @@ async def start_ad_creation(chat_id: int, user_id: int):
         f"Для подтверждения, что вы человек, решите пример: {a} + {b}.\n"
         f"Введите только цифру ответа. Попыток: {config.CAPTCHA_MAX_ATTEMPTS}.",
     )
+    await send_voice_reply(chat_id, user_id, f"Для подтверждения, что вы человек, решите пример: {a} плюс {b}. Введите только цифру ответа.")
 
 async def handle_captcha(chat_id, user_id, data, text):
     if not text:
@@ -467,12 +464,14 @@ async def handle_photos(chat_id, user_id, data, msg_body, text):
             chat_id,
             f"✅ Принято {config.MAX_PHOTOS} фото (максимум).\nУкажите имя продавца:",
         )
+        await send_voice_reply(chat_id, user_id, "Принято максимум фото. Укажите имя продавца.")
         return
 
     if text.lower() in ("готово", "без фото"):
         session_set(chat_id, user_id, "name", data)
         prefix = "" if data["photos"] else "Публикация без фото.\n"
         await safe_send(chat_id, f"{prefix}Укажите имя продавца:")
+        await send_voice_reply(chat_id, user_id, f"{prefix}Укажите имя продавца.")
         return
 
     if data["photos"]:
@@ -481,6 +480,7 @@ async def handle_photos(chat_id, user_id, data, msg_body, text):
             chat_id,
             f"✅ Фото {len(data['photos'])}/{config.MAX_PHOTOS}. Ещё или «Готово».",
         )
+        await send_voice_reply(chat_id, user_id, "Фото принято. Ещё или Готово.")
         return
     await safe_send(chat_id, "Отправьте фото или напишите «Готово» / «Без фото».")
 
@@ -492,6 +492,7 @@ async def handle_name(chat_id, user_id, data, text):
     data["name"] = res
     session_set(chat_id, user_id, "phone", data)
     await safe_send(chat_id, "✅ Имя принято.\nУкажите контактный телефон.")
+    await send_voice_reply(chat_id, user_id, "Имя принято. Укажите контактный телефон.")
 
 async def handle_phone(chat_id, user_id, data, text):
     ok, res = validators.validate_phone(text)
@@ -524,6 +525,7 @@ async def show_preview(chat_id, user_id, data):
         kb,
         attachments or None,
     )
+    await send_voice_reply(chat_id, user_id, "Предпросмотр объявления. Всё верно?")
 
 async def ask_channel(chat_id, user_id, data):
     channels = config.load_channels()
@@ -537,6 +539,7 @@ async def ask_channel(chat_id, user_id, data):
         f"📢 В какой канал опубликовать?\nОсталось объявлений: {limits['left']}/{limits['max']}",
         kb,
     )
+    await send_voice_reply(chat_id, user_id, "В какой канал опубликовать? Выберите кнопку.")
 
 # ---------- Обработка сообщений ----------
 
@@ -609,7 +612,7 @@ async def handle_callback(callback, msg):
         await cmd_my_ads(chat_id, user_id)
         return
     if payload == "menu_faq":
-        await show_faq_menu(chat_id)
+        await show_faq_menu(chat_id, user_id)
         return
     if payload == "menu_back":
         await show_main_menu(chat_id, user_id)
@@ -629,7 +632,7 @@ async def handle_callback(callback, msg):
 
     # FAQ
     if payload.startswith("faq_"):
-        await show_faq_answer(chat_id, payload)
+        await show_faq_answer(chat_id, user_id, payload)
         return
 
     # Остальные сценарии
@@ -724,6 +727,7 @@ async def send_ad_to_moderation(chat_id, user_id, data, target):
     )
     await safe_send(admin_chat, admin_text, kb, attachments or None)
     await safe_send(chat_id, f"📨 Объявление #{ad_id} отправлено на модерацию.")
+    await send_voice_reply(chat_id, user_id, "Объявление отправлено на модерацию.")
 
 async def admin_approve(chat_id, ad_id):
     ad = db.get_ad(ad_id)
@@ -808,6 +812,7 @@ async def cmd_my_ads(chat_id, user_id):
 
     btns.append(("⬅️ В меню", "menu_back"))
     await safe_send(chat_id, "\n".join(lines), make_keyboard(btns))
+    await send_voice_reply(chat_id, user_id, "Ваши последние объявления. Вы можете удалить или повторить их.")
 
 async def delete_user_ad(chat_id, user_id, ad_id):
     ad = db.get_ad(ad_id)
@@ -952,7 +957,7 @@ async def main():
     db.init_db()
     await bot.start()
 
-    log.info("=== БОТ ЗАПУЩЕН (v9 TTS-DefaultOn) ===")
+    log.info("=== БОТ ЗАПУЩЕН (v10 TTS-MenuVoice) ===")
     offset = None
     while True:
         try:
