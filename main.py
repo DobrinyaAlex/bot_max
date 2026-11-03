@@ -1,5 +1,5 @@
 """MAX Bot v2 — объявления с пре-модерацией, голосом и FAQ (чистый aiohttp).
-Версия от 03.11.2026 (v17): исправлена озвучка (символы, фото, дроби) и retry для MAX API.
+Версия от 03.11.2026 (v18): исправлена озвучка фото и валидация имени.
 """
 import asyncio
 import json
@@ -26,6 +26,10 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger("maxbot")
+
+# Словари для правильного склонения при озвучке фото
+PHOTO_NUMS = {1: "одно", 2: "два", 3: "три", 4: "четыре", 5: "пять"}
+PHOTO_DENOMS = {1: "одного", 2: "двух", 3: "трех", 4: "четырех", 5: "пяти"}
 
 class MAXBot:
     def __init__(self, token):
@@ -531,8 +535,16 @@ async def handle_photos(chat_id, user_id, data, msg_body, text):
 
     if data["photos"]:
         session_set(chat_id, user_id, "photos", data)
-        msg = f"✅ Фото {len(data['photos'])}/{config.MAX_PHOTOS}. Загрузите ещё или напишите «Готово»."
-        voice = f"Фото {len(data['photos'])} из {config.MAX_PHOTOS} принято. Загрузите ещё или напишите Готово."
+        n = len(data["photos"])
+        max_n = config.MAX_PHOTOS
+        
+        # Получаем правильные склонения
+        word_n = PHOTO_NUMS.get(n, str(n))
+        word_max = PHOTO_DENOMS.get(max_n, str(max_n))
+        
+        msg = f"✅ Фото {n}/{max_n}. Загрузите ещё или напишите «Готово»."
+        voice = f"Фото {word_n} из {word_max} принято. Загрузите ещё или напишите Готово."
+        
         await safe_send(chat_id, msg)
         await send_voice_reply(chat_id, user_id, voice)
         return
@@ -1018,7 +1030,7 @@ async def main():
     db.init_db()
     await bot.start()
 
-    log.info("=== БОТ ЗАПУЩЕН (v17 TTS-SlashFix) ===")
+    log.info("=== БОТ ЗАПУЩЕН (v18 TTS-Fixes) ===")
     offset = None
     while True:
         try:
