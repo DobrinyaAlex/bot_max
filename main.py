@@ -1,5 +1,5 @@
 """MAX Bot v2 — объявления с пре-модерацией, голосом и FAQ (чистый aiohttp).
-Версия от 03.11.2026 (v6): добавлен content_type при загрузке аудио.
+Версия от 03.11.2026 (v7): исправлена загрузка аудио в MAX (токен берется с первого шага).
 """
 import asyncio
 import json
@@ -124,42 +124,34 @@ class MAXBot:
             return False, {"error": str(e), "_status": 0}
 
     async def upload_audio(self, audio_bytes: bytes) -> tuple[str | None, str]:
-        """Загружает MP3 в MAX и возвращает (token, error_message)."""
+        """Загружает MP3 в MAX. Токен для аудио приходит на первом этапе (POST /uploads)."""
         url = "https://platform-api2.max.ru/uploads?type=audio"
         try:
+            # Шаг 1: получаем upload_url и token
             log.info("MAX API: Запрос URL для загрузки аудио...")
             async with self.session.post(url, headers=self.headers) as r:
                 if r.status != 200:
                     err = await r.text()
-                    log.error("upload_audio get url failed: %s %s", r.status, err)
                     return None, f"HTTP {r.status} при запросе URL: {err}"
                 payload = await r.json()
                 upload_url = payload.get("url")
+                token = payload.get("token")  # ← токен уже здесь!
                 if not upload_url:
-                    log.error("upload_audio: no url in response: %s", payload)
-                    return None, f"MAX не вернул upload_url. Ответ: {payload}"
+                    return None, f"Нет upload_url. Ответ: {payload}"
+                if not token:
+                    return None, f"Нет token в ответе /uploads. Ответ: {payload}"
 
+            # Шаг 2: загружаем файл (ответ может быть пустым или XML — не парсим JSON)
             log.info("MAX API: Отправка файла по URL %s", upload_url)
             form = aiohttp.FormData()
-            # Добавляем content_type, чтобы MAX понимал, что это аудио
             form.add_field("data", audio_bytes, filename="voice.mp3", content_type="audio/mpeg")
             async with self.session.post(upload_url, data=form) as r:
                 if r.status != 200:
                     err = await r.text()
-                    log.error("upload_audio upload failed: %s %s", r.status, err)
                     return None, f"HTTP {r.status} при загрузке файла: {err}"
-                res = await r.json()
-                log.info("MAX API: Ответ на загрузку: %s", res)
-                token = res.get("token")
-                if not token:
-                    for v in res.values():
-                        if isinstance(v, dict) and "token" in v:
-                            token = v["token"]
-                            break
-                if not token:
-                    log.error("upload_audio: no token in response: %s", res)
-                    return None, f"В ответе нет token. Ответ: {res}"
-                return token, ""
+                # Успех: файл загружен, токен уже есть
+
+            return token, ""
         except Exception as e:
             log.exception("upload_audio exception: %s", e)
             return None, str(e)
@@ -351,7 +343,6 @@ async def start_flow(chat_id: int, user_id: int) -> None:
         return
 
     await show_main_menu(chat_id, user_id)
-    # Озвучиваем приветствие только если включено
     await send_voice_reply(
         chat_id, user_id,
         "Добро пожаловать в Деловую Витрину. Выберите действие в меню."
@@ -604,7 +595,6 @@ async def handle_callback(callback, msg):
             await safe_send(chat_id, "🔊 Озвучивание включено. Отправляю тестовое сообщение...")
             ok = await send_voice_reply(chat_id, user_id, "Озвучивание включено.")
             if not ok:
-                # Функция send_voice_reply сама отправит текст ошибки, если она есть
                 pass
         else:
             await safe_send(chat_id, "🔇 Озвучивание выключено.")
@@ -936,7 +926,7 @@ async def main():
     db.init_db()
     await bot.start()
     
-    log.info("=== БОТ ЗАПУЩЕН (v6 TTS-Final) ===")
+    log.info("=== БОТ ЗАПУЩЕН (v7 TTS-Fixed) ===")
     offset = None
     while True:
         try:
