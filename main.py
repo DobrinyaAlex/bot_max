@@ -1,5 +1,5 @@
 """MAX Bot v2 — объявления с пре-модерацией, голосом и FAQ (чистый aiohttp).
-Версия от 03.11.2026: добавлены TTS, меню и FAQ.
+Версия от 03.11.2026 (v2): исправлен порядок появления капчи.
 """
 import asyncio
 import json
@@ -124,7 +124,6 @@ class MAXBot:
             return False, {"error": str(e), "_status": 0}
 
     async def upload_audio(self, audio_bytes: bytes) -> str | None:
-        """Загружает MP3 в MAX и возвращает token."""
         url = "https://platform-api2.max.ru/uploads?type=audio"
         try:
             async with self.session.post(url, headers=self.headers) as r:
@@ -146,7 +145,6 @@ class MAXBot:
                 res = await r.json()
                 token = res.get("token")
                 if not token:
-                    # иногда токен лежит во вложенном объекте
                     for v in res.values():
                         if isinstance(v, dict) and "token" in v:
                             token = v["token"]
@@ -217,13 +215,11 @@ def set_voice_enabled(user_id: int, enabled: bool) -> None:
     db.set_setting(f"voice_{user_id}", "1" if enabled else "0")
 
 async def send_voice_reply(chat_id: int, user_id: int, text: str) -> bool:
-    """Если у пользователя включена озвучка — синтезирует и отправляет голос."""
     if not voice_enabled(user_id):
         return False
     try:
         audio_bytes, path = await tts.synthesize_and_cleanup(text)
         token = await bot.upload_audio(audio_bytes)
-        # удаляем временный файл
         try:
             import os
             os.unlink(path)
@@ -288,7 +284,7 @@ def make_keyboard(buttons: list[tuple[str, str]]):
 
 # ---------- Главное меню и приветствие ----------
 
-async def show_main_menu(chat_id: int, user_id: int, edit: bool = False):
+async def show_main_menu(chat_id: int, user_id: int):
     voice = "🔊 Вкл" if voice_enabled(user_id) else "🔇 Выкл"
     kb = make_keyboard([
         ("📝 Подать объявление", "menu_new_ad"),
@@ -301,9 +297,6 @@ async def show_main_menu(chat_id: int, user_id: int, edit: bool = False):
         "Я помогу разместить объявление в тематических каналах.\n"
         "Выберите действие:"
     )
-    if edit:
-        # В MAX нет простого редактирования, поэтому отправляем новое сообщение
-        pass
     await safe_send(chat_id, text, kb)
 
 async def show_faq_menu(chat_id: int):
@@ -330,6 +323,7 @@ async def show_faq_answer(chat_id: int, key: str):
 # ---------- Сценарий создания объявления ----------
 
 async def start_flow(chat_id: int, user_id: int) -> None:
+    """Показывает главное меню при старте."""
     if chat_id < 0:
         return
     db.upsert_user(user_id)
@@ -342,27 +336,32 @@ async def start_flow(chat_id: int, user_id: int) -> None:
         await safe_send(chat_id, f"⛔ Вы заблокированы до {banned['banned_until']}.")
         return
 
-    limits = db.get_daily_limits(user_id, config.DAILY_AD_LIMIT)
-    if limits["left"] <= 0:
-        await safe_send(chat_id, "❌ Лимит объявлений на сегодня исчерпан.")
-        return
-
-    # приветствие + меню
     await show_main_menu(chat_id, user_id)
-
-    # озвучиваем приветствие, если включено
     await send_voice_reply(
         chat_id, user_id,
         "Добро пожаловать в Деловую Витрину. Выберите действие в меню."
     )
 
-    # запускаем капчу (цепочка не меняется)
+async def start_ad_creation(chat_id: int, user_id: int):
+    """Запускает процесс подачи объявления (с проверкой капчи)."""
+    db.upsert_user(user_id)
+    banned = db.is_banned(user_id)
+    if banned:
+        await safe_send(chat_id, f"⛔ Вы заблокированы до {banned['banned_until']}.")
+        return
+
+    limits = db.get_daily_limits(user_id, config.DAILY_AD_LIMIT)
+    if limits["left"] <= 0:
+        await safe_send(chat_id, "❌ Лимит объявлений на сегодня исчерпан.")
+        return
+
     a, b = random.randint(1, 9), random.randint(1, 9)
     data = {"captcha_answer": str(a + b), "captcha_attempts": 0, "photos": []}
     session_set(chat_id, user_id, "captcha", data)
 
     await safe_send(
         chat_id,
+        f"Осталось объявлений на сегодня: {limits['left']}/{limits['max']}.\n\n"
         f"Для подтверждения, что вы человек, решите пример: {a} + {b}.\n"
         f"Введите только цифру ответа. Попыток: {config.CAPTCHA_MAX_ATTEMPTS}.",
     )
@@ -573,7 +572,7 @@ async def handle_callback(callback, msg):
 
     # Меню
     if payload == "menu_new_ad":
-        await start_flow(chat_id, user_id)
+        await start_ad_creation(chat_id, user_id)
         return
     if payload == "menu_my_ads":
         await cmd_my_ads(chat_id, user_id)
@@ -597,7 +596,7 @@ async def handle_callback(callback, msg):
         await show_faq_answer(chat_id, payload)
         return
 
-    # Остальные сценарии (подача объявления, модерация и т.д.)
+    # Остальные сценарии
     if payload in ("confirm_publish", "edit_text", "cancel_ad"):
         state, data = session_get(chat_id)
         if not data:
@@ -605,6 +604,7 @@ async def handle_callback(callback, msg):
         if payload == "cancel_ad":
             db.clear_session(chat_id)
             await safe_send(chat_id, "Отменено.")
+            await show_main_menu(chat_id, user_id)
         elif payload == "edit_text":
             data["from_edit"] = True
             data["ad_text"] = ""
@@ -770,7 +770,8 @@ async def cmd_my_ads(chat_id, user_id):
         if ad["status"] in ("published", "rejected"):
             btns.append((f"🔁 Повторить #{ad['id']}", f"myads_repeat_{ad['id']}"))
 
-    await safe_send(chat_id, "\n".join(lines), make_keyboard(btns) if btns else None)
+    btns.append(("⬅️ В меню", "menu_back"))
+    await safe_send(chat_id, "\n".join(lines), make_keyboard(btns))
 
 async def delete_user_ad(chat_id, user_id, ad_id):
     ad = db.get_ad(ad_id)
