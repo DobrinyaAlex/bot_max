@@ -1,5 +1,5 @@
 """MAX Bot v2 — объявления с пре-модерацией, голосом и FAQ (чистый aiohttp).
-Версия от 03.11.2026 (v7): исправлена загрузка аудио в MAX (токен берется с первого шага).
+Версия от 03.11.2026 (v9): озвучка включена по умолчанию.
 """
 import asyncio
 import json
@@ -127,7 +127,6 @@ class MAXBot:
         """Загружает MP3 в MAX. Токен для аудио приходит на первом этапе (POST /uploads)."""
         url = "https://platform-api2.max.ru/uploads?type=audio"
         try:
-            # Шаг 1: получаем upload_url и token
             log.info("MAX API: Запрос URL для загрузки аудио...")
             async with self.session.post(url, headers=self.headers) as r:
                 if r.status != 200:
@@ -135,13 +134,12 @@ class MAXBot:
                     return None, f"HTTP {r.status} при запросе URL: {err}"
                 payload = await r.json()
                 upload_url = payload.get("url")
-                token = payload.get("token")  # ← токен уже здесь!
+                token = payload.get("token")
                 if not upload_url:
                     return None, f"Нет upload_url. Ответ: {payload}"
                 if not token:
                     return None, f"Нет token в ответе /uploads. Ответ: {payload}"
 
-            # Шаг 2: загружаем файл (ответ может быть пустым или XML — не парсим JSON)
             log.info("MAX API: Отправка файла по URL %s", upload_url)
             form = aiohttp.FormData()
             form.add_field("data", audio_bytes, filename="voice.mp3", content_type="audio/mpeg")
@@ -149,7 +147,6 @@ class MAXBot:
                 if r.status != 200:
                     err = await r.text()
                     return None, f"HTTP {r.status} при загрузке файла: {err}"
-                # Успех: файл загружен, токен уже есть
 
             return token, ""
         except Exception as e:
@@ -209,6 +206,10 @@ def moderation_target() -> int | None:
 
 def voice_enabled(user_id: int) -> bool:
     val = db.get_setting(f"voice_{user_id}")
+    if val is None:
+        # По умолчанию включено для новых пользователей
+        set_voice_enabled(user_id, True)
+        return True
     return val == "1"
 
 def set_voice_enabled(user_id: int, enabled: bool) -> None:
@@ -221,7 +222,7 @@ async def send_voice_reply(chat_id: int, user_id: int, text: str) -> bool:
         log.info("TTS: Старт синтеза для текста: '%s'", text)
         audio_bytes, path = await tts.synthesize_and_cleanup(text)
         log.info("TTS: Синтез успешен, размер: %s байт", len(audio_bytes))
-        
+
         token, err = await bot.upload_audio(audio_bytes)
         try:
             import os
@@ -232,15 +233,40 @@ async def send_voice_reply(chat_id: int, user_id: int, text: str) -> bool:
         if not token:
             raise RuntimeError(f"Ошибка загрузки аудио в MAX: {err}")
 
-        log.info("TTS: Отправка аудио-сообщения в чат %s...", chat_id)
+        # Даём серверу время на обработку файла перед первой попыткой
+        await asyncio.sleep(1.0)
+
         attachment = {"type": "audio", "payload": {"token": token}}
-        res = await bot.send_message(chat_id, "", attachments=[attachment])
-        log.info("TTS: Ответ на отправку: %s", res)
-        
-        if res.get("error") or res.get("ok") is False:
-            raise RuntimeError(f"Ошибка отправки аудио: {res}")
-            
-        return True
+        max_retries = 4
+        delay = 1.0
+        last_res = None
+
+        for attempt in range(1, max_retries + 1):
+            log.info("TTS: Попытка отправки аудио %s/%s...", attempt, max_retries)
+            res = await bot.send_message(chat_id, "", attachments=[attachment])
+            log.info("TTS: Ответ на отправку: %s", res)
+
+            if not res.get("error") and res.get("ok") is not False:
+                return True
+
+            last_res = res
+            error_code = res.get("code")
+            if error_code == "attachment.not.ready":
+                if attempt < max_retries:
+                    log.warning(
+                        "TTS: attachment.not.ready, повтор через %.1f сек...",
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                    continue
+                else:
+                    break
+            else:
+                # Другая ошибка — нет смысла повторять
+                break
+
+        raise RuntimeError(f"Ошибка отправки аудио: {last_res}")
     except Exception as e:
         log.exception("send_voice_reply failed: %s", e)
         if "Озвучивание включено" in text:
@@ -925,8 +951,8 @@ async def cmd_admin(chat_id, user_id, text):
 async def main():
     db.init_db()
     await bot.start()
-    
-    log.info("=== БОТ ЗАПУЩЕН (v7 TTS-Fixed) ===")
+
+    log.info("=== БОТ ЗАПУЩЕН (v9 TTS-DefaultOn) ===")
     offset = None
     while True:
         try:
