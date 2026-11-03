@@ -1,5 +1,5 @@
 """MAX Bot v2 — объявления с пре-модерацией, голосом и FAQ (чистый aiohttp).
-Версия от 03.11.2026 (v15): полная озвучка меню и всех статусов.
+Версия от 03.11.2026 (v16): исправлена озвучка дробей, плюса и справки.
 """
 import asyncio
 import json
@@ -362,11 +362,11 @@ async def show_main_menu(chat_id: int, user_id: int, is_start: bool = False):
 async def show_help_menu(chat_id: int, user_id: int):
     text = (
         "🤖 Доступные команды и действия:\n\n"
-        "🔹 /start — Перезапустить бота и показать главное меню\n"
-        "🔹 /menu — Вернуться в главное меню\n"
-        "🔹 /my — Посмотреть, удалить или повторить ваши объявления\n"
-        "🔹 /cancel — Отменить текущее действие (например, заполнение объявления)\n"
-        "🔹 /help — Показать это сообщение\n\n"
+        "🔹 /start — Перезапустить бота и показать главное меню.\n"
+        "🔹 /menu — Вернуться в главное меню.\n"
+        "🔹 /my — Посмотреть, удалить или повторить ваши объявления.\n"
+        "🔹 /cancel — Отменить текущее действие (например, заполнение объявления).\n"
+        "🔹 /help — Показать это сообщение.\n\n"
         "📝 Как подать объявление:\n"
         "Нажмите «Подать объявление» в меню, пройдите капчу, введите текст, прикрепите фото (до 5 шт.), укажите имя и телефон.\n\n"
         "⏳ После этого объявление уйдет на ручную модерацию администратору. Если оно одобрено, оно появится в выбранном канале."
@@ -432,8 +432,8 @@ async def start_ad_creation(chat_id: int, user_id: int):
     session_set(chat_id, user_id, "captcha", data)
 
     text = (
-        f"Осталось объявлений на сегодня: {limits['left']}/{limits['max']}.\n\n"
-        f"Для подтверждения, что вы человек, решите пример: {a} + {b}.\n"
+        f"Осталось объявлений на сегодня: {limits['left']} из {limits['max']}.\n\n"
+        f"Для подтверждения, что вы человек, решите пример: {a} плюс {b}.\n"
         f"Введите только цифру ответа. Попыток: {config.CAPTCHA_MAX_ATTEMPTS}."
     )
     await safe_send(chat_id, text)
@@ -469,7 +469,7 @@ async def handle_captcha(chat_id, user_id, data, text):
     session_set(chat_id, user_id, "captcha", data)
     await safe_send(
         chat_id,
-        f"❌ Неверно. Попытка {attempts}/{config.CAPTCHA_MAX_ATTEMPTS}. Новый пример: {a} + {b}.",
+        f"❌ Неверно. Попытка {attempts}/{config.CAPTCHA_MAX_ATTEMPTS}. Новый пример: {a} плюс {b}.",
     )
 
 async def handle_text(chat_id, user_id, data, text):
@@ -573,7 +573,7 @@ async def ask_channel(chat_id, user_id, data):
         [(ch["name"], f"channel_{i}") for i, ch in enumerate(channels)]
     )
     session_set(chat_id, user_id, "channel", data)
-    text = f"📢 В какой канал опубликовать?\nОсталось объявлений: {limits['left']}/{limits['max']}"
+    text = f"📢 В какой канал опубликовать?\nОсталось объявлений: {limits['left']} из {limits['max']}"
     await safe_send(chat_id, text, kb)
     await send_voice_reply(chat_id, user_id, text)
 
@@ -995,7 +995,7 @@ async def main():
     db.init_db()
     await bot.start()
 
-    log.info("=== БОТ ЗАПУЩЕН (v15 TTS-FullVoice) ===")
+    log.info("=== БОТ ЗАПУЩЕН (v16 TTS-Fixes) ===")
     offset = None
     while True:
         try:
