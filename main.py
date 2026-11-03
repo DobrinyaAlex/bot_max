@@ -1,15 +1,5 @@
-"""MAX Bot v2 — объявления с пре-модерацией (чистый aiohttp).
-Версия от 02.11.2026: исправлено удаление объявлений из каналов.
-
-Ключевые изменения относительно предыдущей версии:
-- _extract_mid(): правильное извлечение ID сообщения из ответа MAX API
-  (MAX кладёт его в res["message"]["body"]["mid"], а не в res["message_id"]);
-- delete_message(): чтение тела ответа и проверка поля ok, логирование;
-- admin_approve(): если ID не получен — объявление помечается rejected
-  с причиной "publish_failed", админ и пользователь получают уведомление;
-- delete_user_ad(): различает "уже удалено" (404) и реальную ошибку
-  (403/400/сеть), сообщает точную причину;
-- send_message(): возвращает структурированный ответ даже при HTTP-ошибке.
+"""MAX Bot v2 — объявления с пре-модерацией, голосом и FAQ (чистый aiohttp).
+Версия от 03.11.2026: добавлены TTS, меню и FAQ.
 """
 import asyncio
 import json
@@ -24,6 +14,7 @@ import config
 import db
 import media
 import validators
+import tts
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,7 +44,6 @@ class MAXBot:
             await self.session.close()
 
     async def send_message(self, chat_id: int, text: str, keyboard=None, attachments=None):
-        """Отправляет сообщение. Всегда возвращает dict (при HTTP-ошибке — с ok=False)."""
         params = {"chat_id": chat_id}
         payload = {"text": text}
         final_attachments = list(attachments) if attachments else []
@@ -104,9 +94,6 @@ class MAXBot:
             pass
 
     async def delete_message(self, chat_id: int, message_id) -> tuple[bool, dict]:
-        """Удаляет сообщение. Возвращает (ok, body).
-        ok=True только если HTTP 200 и в теле нет ok=false / error.
-        """
         if message_id is None:
             return False, {"error": "message_id is None", "_status": 0}
 
@@ -136,14 +123,45 @@ class MAXBot:
             log.exception("delete_message exception: %s", e)
             return False, {"error": str(e), "_status": 0}
 
+    async def upload_audio(self, audio_bytes: bytes) -> str | None:
+        """Загружает MP3 в MAX и возвращает token."""
+        url = "https://platform-api2.max.ru/uploads?type=audio"
+        try:
+            async with self.session.post(url, headers=self.headers) as r:
+                if r.status != 200:
+                    log.error("upload_audio get url failed: %s %s", r.status, await r.text())
+                    return None
+                payload = await r.json()
+                upload_url = payload.get("url")
+                if not upload_url:
+                    log.error("upload_audio: no url in response: %s", payload)
+                    return None
+
+            form = aiohttp.FormData()
+            form.add_field("data", audio_bytes, filename="voice.mp3")
+            async with self.session.post(upload_url, data=form) as r:
+                if r.status != 200:
+                    log.error("upload_audio upload failed: %s %s", r.status, await r.text())
+                    return None
+                res = await r.json()
+                token = res.get("token")
+                if not token:
+                    # иногда токен лежит во вложенном объекте
+                    for v in res.values():
+                        if isinstance(v, dict) and "token" in v:
+                            token = v["token"]
+                            break
+                if not token:
+                    log.error("upload_audio: no token in response: %s", res)
+                return token
+        except Exception as e:
+            log.exception("upload_audio exception: %s", e)
+            return None
+
 bot = MAXBot(config.BOT_TOKEN)
 _last_msg_ts: dict[int, float] = {}
 
 def _extract_mid(res) -> int | str | None:
-    """Достаёт ID сообщения из ответа MAX API.
-    MAX кладёт его в res["message"]["body"]["mid"] (поле mid, может быть int или str).
-    Порядок проверки — от самого вероятного к резервному.
-    """
     if not isinstance(res, dict):
         return None
     msg = res.get("message") or {}
@@ -161,17 +179,6 @@ def _extract_mid(res) -> int | str | None:
             return int(v)
         except (TypeError, ValueError):
             return v
-    return None
-
-def get_user_id(obj) -> int | None:
-    if hasattr(obj, "user") and hasattr(obj.user, "user_id"):
-        return obj.user.user_id
-    if hasattr(obj, "sender") and hasattr(obj.sender, "user_id"):
-        return obj.sender.user_id
-    if hasattr(obj, "message") and hasattr(obj.message, "sender") and hasattr(
-        obj.message.sender, "user_id"
-    ):
-        return obj.message.sender.user_id
     return None
 
 def now_iso() -> str:
@@ -200,6 +207,38 @@ def moderation_target() -> int | None:
         return config.ADMIN_USER_IDS[0]
     return None
 
+# ---------- Настройки пользователя (озвучка) ----------
+
+def voice_enabled(user_id: int) -> bool:
+    val = db.get_setting(f"voice_{user_id}")
+    return val == "1"
+
+def set_voice_enabled(user_id: int, enabled: bool) -> None:
+    db.set_setting(f"voice_{user_id}", "1" if enabled else "0")
+
+async def send_voice_reply(chat_id: int, user_id: int, text: str) -> bool:
+    """Если у пользователя включена озвучка — синтезирует и отправляет голос."""
+    if not voice_enabled(user_id):
+        return False
+    try:
+        audio_bytes, path = await tts.synthesize_and_cleanup(text)
+        token = await bot.upload_audio(audio_bytes)
+        # удаляем временный файл
+        try:
+            import os
+            os.unlink(path)
+        except Exception:
+            pass
+        if not token:
+            log.warning("send_voice_reply: no token for text len=%s", len(text))
+            return False
+        attachment = {"type": "audio", "payload": {"token": token}}
+        res = await bot.send_message(chat_id, "", attachments=[attachment])
+        return bool(res) and not res.get("error")
+    except Exception as e:
+        log.exception("send_voice_reply failed: %s", e)
+        return False
+
 async def safe_send(chat_id: int, text: str, keyboard=None, attachments=None) -> bool:
     return bool(await bot.send_message(chat_id, text, keyboard, attachments))
 
@@ -207,6 +246,8 @@ async def alert_admin(text: str) -> None:
     target = moderation_target()
     if target:
         await bot.send_message(target, text)
+
+# ---------- Сессии ----------
 
 def session_get(chat_id: int) -> tuple[str | None, dict | None]:
     s = db.get_session(chat_id)
@@ -245,6 +286,47 @@ def make_keyboard(buttons: list[tuple[str, str]]):
         },
     }
 
+# ---------- Главное меню и приветствие ----------
+
+async def show_main_menu(chat_id: int, user_id: int, edit: bool = False):
+    voice = "🔊 Вкл" if voice_enabled(user_id) else "🔇 Выкл"
+    kb = make_keyboard([
+        ("📝 Подать объявление", "menu_new_ad"),
+        ("📋 Мои объявления", "menu_my_ads"),
+        ("❓ FAQ", "menu_faq"),
+        (f"{voice} озвучивание", "menu_toggle_voice"),
+    ])
+    text = (
+        "👋 Добро пожаловать в «Деловую Витрину»!\n\n"
+        "Я помогу разместить объявление в тематических каналах.\n"
+        "Выберите действие:"
+    )
+    if edit:
+        # В MAX нет простого редактирования, поэтому отправляем новое сообщение
+        pass
+    await safe_send(chat_id, text, kb)
+
+async def show_faq_menu(chat_id: int):
+    kb = make_keyboard([
+        ("Как подать объявление?", "faq_how"),
+        ("Сколько стоит?", "faq_price"),
+        ("Как удалить объявление?", "faq_delete"),
+        ("Почему объявление не опубликовано?", "faq_moderation"),
+        ("⬅️ Назад", "menu_back"),
+    ])
+    await safe_send(chat_id, "❓ Частые вопросы:", kb)
+
+async def show_faq_answer(chat_id: int, key: str):
+    answers = {
+        "faq_how": "Чтобы подать объявление, нажмите «📝 Подать объявление» в главном меню. Бот проведёт вас по шагам: капча, текст, фото, имя, телефон и выбор канала.",
+        "faq_price": "Размещение объявлений бесплатно. Ограничение — до 6 объявлений в сутки с одного аккаунта.",
+        "faq_delete": "Откройте «📋 Мои объявления», найдите нужное объявление и нажмите «🗑 Удалить». Оно будет удалено из канала.",
+        "faq_moderation": "Все объявления проходят ручную модерацию. Если объявление отклонено, причина будет указана в уведомлении. Чаще всего это спам, нецензурная лексика или контакты в тексте.",
+    }
+    text = answers.get(key, "Информация не найдена.")
+    kb = make_keyboard([("⬅️ Назад к FAQ", "menu_faq")])
+    await safe_send(chat_id, text, kb)
+
 # ---------- Сценарий создания объявления ----------
 
 async def start_flow(chat_id: int, user_id: int) -> None:
@@ -265,15 +347,22 @@ async def start_flow(chat_id: int, user_id: int) -> None:
         await safe_send(chat_id, "❌ Лимит объявлений на сегодня исчерпан.")
         return
 
+    # приветствие + меню
+    await show_main_menu(chat_id, user_id)
+
+    # озвучиваем приветствие, если включено
+    await send_voice_reply(
+        chat_id, user_id,
+        "Добро пожаловать в Деловую Витрину. Выберите действие в меню."
+    )
+
+    # запускаем капчу (цепочка не меняется)
     a, b = random.randint(1, 9), random.randint(1, 9)
     data = {"captcha_answer": str(a + b), "captcha_attempts": 0, "photos": []}
     session_set(chat_id, user_id, "captcha", data)
 
     await safe_send(
         chat_id,
-        f"Здравствуйте! Я помогу оформить объявление.\n"
-        f"Осталось объявлений на сегодня: {limits['left']}/{limits['max']}.\n\n"
-        f"💡 Команды:\n/my — ваши объявления\n/cancel — отменить действие\n/help — справка\n\n"
         f"Для подтверждения, что вы человек, решите пример: {a} + {b}.\n"
         f"Введите только цифру ответа. Попыток: {config.CAPTCHA_MAX_ATTEMPTS}.",
     )
@@ -284,10 +373,9 @@ async def handle_captcha(chat_id, user_id, data, text):
     if text == data.get("captcha_answer"):
         data["captcha_attempts"] = 0
         session_set(chat_id, user_id, "text", data)
-        await safe_send(
-            chat_id,
-            f"✅ Проверка пройдена!\nВведите текст объявления (до {config.MAX_TEXT_LEN} символов):",
-        )
+        msg = f"✅ Проверка пройдена!\nВведите текст объявления (до {config.MAX_TEXT_LEN} символов):"
+        await safe_send(chat_id, msg)
+        await send_voice_reply(chat_id, user_id, "Проверка пройдена. Введите текст объявления.")
         return
 
     attempts = data.get("captcha_attempts", 0) + 1
@@ -329,11 +417,12 @@ async def handle_text(chat_id, user_id, data, text):
     data.setdefault("photos", [])
     session_set(chat_id, user_id, "photos", data)
     extra = "\n⚠️ Обнаружена ссылка." if has_url else ""
-    await safe_send(
-        chat_id,
+    msg_text = (
         f"✅ Текст принят ({len(msg)}/{config.MAX_TEXT_LEN}).{extra}\n"
-        f"Отправьте до {config.MAX_PHOTOS} фото или напишите «Готово».",
+        f"Отправьте до {config.MAX_PHOTOS} фото или напишите «Готово»."
     )
+    await safe_send(chat_id, msg_text)
+    await send_voice_reply(chat_id, user_id, "Текст принят. Отправьте фото или напишите Готово.")
 
 async def handle_photos(chat_id, user_id, data, msg_body, text):
     for att in msg_body.get("attachments", []):
@@ -419,7 +508,7 @@ async def ask_channel(chat_id, user_id, data):
         kb,
     )
 
-# ---------- Обработка входящих сообщений ----------
+# ---------- Обработка сообщений ----------
 
 async def handle_message(msg):
     chat_id = msg.get("recipient", {}).get("chat_id")
@@ -433,12 +522,15 @@ async def handle_message(msg):
     if text.startswith("/start"):
         await start_flow(chat_id, user_id)
         return
+    if text == "/menu":
+        await show_main_menu(chat_id, user_id)
+        return
     if text == "/cancel":
         db.clear_session(chat_id)
         await safe_send(chat_id, "Отменено.")
         return
     if text == "/help":
-        await safe_send(chat_id, "Команды:\n/start\n/my\n/cancel\n/help")
+        await safe_send(chat_id, "Команды:\n/start — главное меню\n/my — мои объявления\n/cancel — отменить\n/help — справка")
         return
     if text == "/my":
         await cmd_my_ads(chat_id, user_id)
@@ -454,7 +546,7 @@ async def handle_message(msg):
 
     state, data = session_get(chat_id)
     if state is None:
-        await safe_send(chat_id, "Нажмите /start, чтобы начать.")
+        await show_main_menu(chat_id, user_id)
         return
 
     if state == "captcha":
@@ -479,6 +571,33 @@ async def handle_callback(callback, msg):
     chat_id = msg.get("recipient", {}).get("chat_id")
     user_id = callback.get("user", {}).get("user_id") or chat_id
 
+    # Меню
+    if payload == "menu_new_ad":
+        await start_flow(chat_id, user_id)
+        return
+    if payload == "menu_my_ads":
+        await cmd_my_ads(chat_id, user_id)
+        return
+    if payload == "menu_faq":
+        await show_faq_menu(chat_id)
+        return
+    if payload == "menu_back":
+        await show_main_menu(chat_id, user_id)
+        return
+    if payload == "menu_toggle_voice":
+        new_state = not voice_enabled(user_id)
+        set_voice_enabled(user_id, new_state)
+        status = "включено" if new_state else "выключено"
+        await safe_send(chat_id, f"🔊 Озвучивание {status}.")
+        await show_main_menu(chat_id, user_id)
+        return
+
+    # FAQ
+    if payload.startswith("faq_"):
+        await show_faq_answer(chat_id, payload)
+        return
+
+    # Остальные сценарии (подача объявления, модерация и т.д.)
     if payload in ("confirm_publish", "edit_text", "cancel_ad"):
         state, data = session_get(chat_id)
         if not data:
@@ -630,7 +749,7 @@ async def admin_reject(chat_id, ad_id, reason_code):
     await safe_send(ad["chat_id"], f"❌ Объявление #{ad_id} отклонено.\nПричина: {reason}.")
     await safe_send(chat_id, f"🚫 #{ad_id} отклонено.")
 
-# ---------- /my и действия с объявлениями ----------
+# ---------- /my ----------
 
 async def cmd_my_ads(chat_id, user_id):
     ads = db.get_user_ads(user_id, limit=10)
@@ -659,7 +778,6 @@ async def delete_user_ad(chat_id, user_id, ad_id):
         await safe_send(chat_id, f"⚠️ #{ad_id} нельзя удалить (не ваше или не опубликовано).")
         return
 
-    # Старые объявления, опубликованные до фикса, имеют channel_msg_id = NULL
     if not ad["channel_msg_id"]:
         log.error("delete_user_ad: ad %s has NULL channel_msg_id", ad_id)
         db.update_ad_status(ad_id, "deleted")
@@ -672,7 +790,6 @@ async def delete_user_ad(chat_id, user_id, ad_id):
         return
 
     ok, body = await bot.delete_message(ad["channel_id"], ad["channel_msg_id"])
-    # Soft-delete: статус обновляем в любом случае (по спеке п. 4Б PROJECT_CONTEXT)
     db.update_ad_status(ad_id, "deleted")
 
     if ok:
@@ -797,7 +914,7 @@ async def cmd_admin(chat_id, user_id, text):
 async def main():
     db.init_db()
     await bot.start()
-    log.info("=== БОТ ЗАПУЩЕН (pure aiohttp) ===")
+    log.info("=== БОТ ЗАПУЩЕН (pure aiohttp, TTS, FAQ) ===")
     offset = None
     while True:
         try:
